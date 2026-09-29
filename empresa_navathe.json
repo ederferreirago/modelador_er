@@ -1,0 +1,417 @@
+{
+  "entities": [
+    {
+      "id": "e10",
+      "name": "FUNCIONARIO",
+      "x": 200,
+      "y": 260,
+      "is_weak": false,
+      "attrs": [
+        {
+          "id": "a4",
+          "name": "Nome",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "composite",
+          "sub_attrs": [
+            {
+              "id": "a1",
+              "name": "Pnome",
+              "type": "STRING",
+              "pk": false,
+              "nn": false,
+              "attr_type": "simple",
+              "sub_attrs": [],
+              "description": "Primeiro nome"
+            },
+            {
+              "id": "a2",
+              "name": "Minicial",
+              "type": "STRING",
+              "pk": false,
+              "nn": false,
+              "attr_type": "simple",
+              "sub_attrs": [],
+              "description": "Inicial do nome do meio"
+            },
+            {
+              "id": "a3",
+              "name": "Unome",
+              "type": "STRING",
+              "pk": false,
+              "nn": false,
+              "attr_type": "simple",
+              "sub_attrs": [],
+              "description": "Último nome"
+            }
+          ],
+          "offset_x": -30,
+          "offset_y": -90,
+          "description": "Nome completo (composto)"
+        },
+        {
+          "id": "a5",
+          "name": "Cpf",
+          "type": "STRING",
+          "pk": true,
+          "nn": true,
+          "attr_type": "pk",
+          "sub_attrs": [],
+          "offset_x": -150,
+          "offset_y": -50,
+          "description": "CPF do funcionário (identificador)"
+        },
+        {
+          "id": "a6",
+          "name": "Datanasc",
+          "type": "DATE",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": -150,
+          "offset_y": -110,
+          "description": "Data de nascimento"
+        },
+        {
+          "id": "a7",
+          "name": "Endereco",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 60,
+          "offset_y": -90,
+          "description": "Endereço residencial"
+        },
+        {
+          "id": "a8",
+          "name": "Salario",
+          "type": "DECIMAL",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 140,
+          "offset_y": -90,
+          "description": "Salário mensal"
+        },
+        {
+          "id": "a9",
+          "name": "Sexo",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 140,
+          "offset_y": -40,
+          "description": "Sexo do funcionário"
+        }
+      ],
+      "description": "Empregado da empresa"
+    },
+    {
+      "id": "e15",
+      "name": "DEPARTAMENTO",
+      "x": 850,
+      "y": 260,
+      "is_weak": false,
+      "attrs": [
+        {
+          "id": "a11",
+          "name": "Nome",
+          "type": "STRING",
+          "pk": true,
+          "nn": true,
+          "attr_type": "pk",
+          "sub_attrs": [],
+          "offset_x": -50,
+          "offset_y": -80,
+          "description": "Nome do departamento"
+        },
+        {
+          "id": "a12",
+          "name": "Localizacoes",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "multivalued",
+          "sub_attrs": [],
+          "offset_x": 60,
+          "offset_y": -100,
+          "description": "Localizações (cidades) do departamento"
+        },
+        {
+          "id": "a13",
+          "name": "Numero",
+          "type": "INTEGER",
+          "pk": true,
+          "nn": true,
+          "attr_type": "pk",
+          "sub_attrs": [],
+          "offset_x": 140,
+          "offset_y": -80,
+          "description": "Número do departamento"
+        },
+        {
+          "id": "a14",
+          "name": "Numero_funcionarios",
+          "type": "INTEGER",
+          "pk": false,
+          "nn": false,
+          "attr_type": "derived",
+          "sub_attrs": [],
+          "offset_x": -180,
+          "offset_y": 10,
+          "description": "Quantidade de funcionários (derivado)"
+        }
+      ],
+      "description": "Departamento da empresa"
+    },
+    {
+      "id": "e19",
+      "name": "PROJETO",
+      "x": 850,
+      "y": 560,
+      "is_weak": false,
+      "attrs": [
+        {
+          "id": "a16",
+          "name": "Nome",
+          "type": "STRING",
+          "pk": true,
+          "nn": true,
+          "attr_type": "pk",
+          "sub_attrs": [],
+          "offset_x": -80,
+          "offset_y": 70,
+          "description": "Nome do projeto"
+        },
+        {
+          "id": "a17",
+          "name": "Numero",
+          "type": "INTEGER",
+          "pk": true,
+          "nn": true,
+          "attr_type": "pk",
+          "sub_attrs": [],
+          "offset_x": -40,
+          "offset_y": 110,
+          "description": "Número do projeto"
+        },
+        {
+          "id": "a18",
+          "name": "Localizacao",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 80,
+          "offset_y": 80,
+          "description": "Localização do projeto"
+        }
+      ],
+      "description": "Projeto controlado por um departamento"
+    },
+    {
+      "id": "e24",
+      "name": "DEPENDENTE",
+      "x": 440,
+      "y": 800,
+      "is_weak": true,
+      "attrs": [
+        {
+          "id": "a20",
+          "name": "Nome",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "partial_key",
+          "sub_attrs": [],
+          "offset_x": -130,
+          "offset_y": 70,
+          "description": "Nome do dependente (chave parcial)"
+        },
+        {
+          "id": "a21",
+          "name": "Sexo",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": -50,
+          "offset_y": 70,
+          "description": "Sexo do dependente"
+        },
+        {
+          "id": "a22",
+          "name": "Data_nascimento",
+          "type": "DATE",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 50,
+          "offset_y": 70,
+          "description": "Data de nascimento do dependente"
+        },
+        {
+          "id": "a23",
+          "name": "Parentesco",
+          "type": "STRING",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "offset_x": 140,
+          "offset_y": 70,
+          "description": "Grau de parentesco com o funcionário"
+        }
+      ],
+      "description": "Dependente de um funcionário (entidade fraca)"
+    }
+  ],
+  "rels": [
+    {
+      "id": "r25",
+      "name": "SUPERVISAO",
+      "entity1_id": "e10",
+      "entity2_id": "e10",
+      "one_id": "e10",
+      "many_id": "e10",
+      "kind": "1N",
+      "card1": "1",
+      "card2": "N",
+      "part1": "partial",
+      "part2": "partial",
+      "role1": "Supervisor",
+      "role2": "Supervisionado",
+      "is_identifying": false,
+      "attrs": [],
+      "pos_x": 120,
+      "pos_y": 550
+    },
+    {
+      "id": "r26",
+      "name": "TRABALHA_PARA",
+      "entity1_id": "e10",
+      "entity2_id": "e15",
+      "one_id": "e10",
+      "many_id": "e15",
+      "kind": "N1",
+      "card1": "N",
+      "card2": "1",
+      "part1": "partial",
+      "part2": "partial",
+      "role1": "",
+      "role2": "",
+      "is_identifying": false,
+      "attrs": [],
+      "pos_x": 530,
+      "pos_y": 160
+    },
+    {
+      "id": "r28",
+      "name": "GERENCIA",
+      "entity1_id": "e10",
+      "entity2_id": "e15",
+      "one_id": "e10",
+      "many_id": "e15",
+      "kind": "11",
+      "card1": "1",
+      "card2": "1",
+      "part1": "partial",
+      "part2": "total",
+      "role1": "",
+      "role2": "",
+      "is_identifying": false,
+      "attrs": [
+        {
+          "id": "a27",
+          "name": "Data_inicio",
+          "type": "DATE",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "description": "Data em que o gerente assumiu o departamento"
+        }
+      ],
+      "pos_x": 530,
+      "pos_y": 360
+    },
+    {
+      "id": "r29",
+      "name": "CONTROLA",
+      "entity1_id": "e15",
+      "entity2_id": "e19",
+      "one_id": "e15",
+      "many_id": "e19",
+      "kind": "1N",
+      "card1": "1",
+      "card2": "N",
+      "part1": "partial",
+      "part2": "total",
+      "role1": "",
+      "role2": "",
+      "is_identifying": false,
+      "attrs": [],
+      "pos_x": 930,
+      "pos_y": 430
+    },
+    {
+      "id": "r31",
+      "name": "TRABALHA_EM",
+      "entity1_id": "e10",
+      "entity2_id": "e19",
+      "one_id": "e10",
+      "many_id": "e19",
+      "kind": "NN",
+      "card1": "M",
+      "card2": "N",
+      "part1": "partial",
+      "part2": "total",
+      "role1": "",
+      "role2": "",
+      "is_identifying": false,
+      "attrs": [
+        {
+          "id": "a30",
+          "name": "Horas",
+          "type": "DECIMAL",
+          "pk": false,
+          "nn": false,
+          "attr_type": "simple",
+          "sub_attrs": [],
+          "description": "Horas semanais dedicadas ao projeto"
+        }
+      ],
+      "pos_x": 620,
+      "pos_y": 520
+    },
+    {
+      "id": "r32",
+      "name": "DEPENDENTES_DE",
+      "entity1_id": "e10",
+      "entity2_id": "e24",
+      "one_id": "e10",
+      "many_id": "e24",
+      "kind": "1N",
+      "card1": "1",
+      "card2": "N",
+      "part1": "partial",
+      "part2": "total",
+      "role1": "",
+      "role2": "",
+      "is_identifying": true,
+      "attrs": [],
+      "pos_x": 450,
+      "pos_y": 660
+    }
+  ]
+}

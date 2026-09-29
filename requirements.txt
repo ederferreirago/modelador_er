@@ -1,0 +1,3 @@
+# Tkinter já vem embutido no Python (padrão no instalador oficial do Windows).
+# reportlab é necessário apenas para a exportação em PDF.
+reportlab>=4.0
