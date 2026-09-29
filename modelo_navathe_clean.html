@@ -1,0 +1,709 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Modelo de Dados — Notação de Chen (Navathe 6ª Edição)</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --border-focus: #cbd5e1;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --primary: #2563eb;
+      --primary-light: #eff6ff;
+      --primary-border: #bfdbfe;
+      --amber: #d97706;
+      --amber-light: #fefce8;
+      --amber-border: #fef08a;
+      --slate: #334155;
+      --radius: 8px;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 32px 16px;
+    }
+
+    .container {
+      max-width: 1040px;
+      margin: 0 auto;
+    }
+
+    /* Header / Hero */
+    .hero {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px 28px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow-sm);
+    }
+    .hero-title {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .hero-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+    .meta-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .meta-pill {
+      font-size: 12px;
+      padding: 4px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 9999px;
+      color: var(--slate);
+      font-weight: 500;
+    }
+
+    /* Section Headings */
+    .section-header {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--slate);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 28px 0 14px 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 18px;
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .card:hover {
+      border-color: var(--border-focus);
+    }
+    .card-header {
+      padding: 12px 18px;
+      background: #fafbfc;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+    .badge-strong {
+      background: var(--primary-light);
+      color: var(--primary);
+      border: 1px solid var(--primary-border);
+    }
+    .badge-weak {
+      background: var(--amber-light);
+      color: var(--amber);
+      border: 1px solid var(--amber-border);
+    }
+    .badge-pk {
+      background: #eef2ff;
+      color: #3730a3;
+      border: 1px solid #c7d2fe;
+    }
+    .badge-partial {
+      background: #fffbeb;
+      color: #92400e;
+      border: 1px dashed #fcd34d;
+    }
+    .badge-multi {
+      background: #faf5ff;
+      color: #6b21a8;
+      border: 1px solid #e9d5ff;
+    }
+    .badge-derived {
+      background: #f0fdf4;
+      color: #166534;
+      border: 1px dashed #86efac;
+    }
+    .badge-comp {
+      background: #f8fafc;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+    }
+    .badge-simple {
+      background: #f1f5f9;
+      color: #475569;
+      border: 1px solid #e2e8f0;
+    }
+    .badge-total {
+      background: #fef2f2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+    }
+    .badge-partial-part {
+      background: #f1f5f9;
+      color: #475569;
+      border: 1px solid #e2e8f0;
+    }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+    th {
+      padding: 8px 16px;
+      background: #f8fafc;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 10px 16px;
+      border-bottom: 1px solid #f1f5f9;
+      color: var(--text);
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    tr:hover td {
+      background-color: #fafbfc;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      background: #f1f5f9;
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #0f172a;
+    }
+
+    /* Rel Diagrammatic Row */
+    .rel-flow {
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #fdfefe;
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .entity-box {
+      padding: 6px 14px;
+      background: var(--surface);
+      border: 1.5px solid #334155;
+      border-radius: 4px;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+    }
+    .entity-box.weak {
+      border: 2px double #334155;
+    }
+    .diamond-box {
+      padding: 5px 12px;
+      background: var(--surface);
+      border: 1.5px solid var(--amber);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      transform: skewX(-12deg);
+      border-radius: 3px;
+    }
+    .diamond-box.identifying {
+      border: 2px double var(--amber);
+    }
+    .diamond-box span {
+      display: inline-block;
+      transform: skewX(12deg);
+    }
+    .line-indicator {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .line-bar {
+      height: 2px;
+      background: #94a3b8;
+      width: 48px;
+      margin: 2px 0;
+    }
+    .line-bar.double {
+      height: 4px;
+      background: transparent;
+      border-top: 2px solid #94a3b8;
+      border-bottom: 2px solid #94a3b8;
+    }
+    .rel-meta {
+      padding: 8px 18px 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      border-top: 1px solid #f1f5f9;
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    @media print {
+      body { padding: 0; background: white; }
+      .card { box-shadow: none; break-inside: avoid; }
+      .hero { box-shadow: none; border-color: #ccc; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1 class="hero-title">
+        <span>📐 Modelo de Dados Conceitual</span>
+        <span class="badge badge-strong">Notação de Chen</span>
+      </h1>
+      <p class="hero-subtitle">
+        Conforme a especificação formal de <em>Sistemas de Banco de Dados</em> (Ramez Elmasri &amp; Shamkant B. Navathe, 6ª Edição).
+      </p>
+      <div class="meta-pills">
+        <span class="meta-pill">🏛 <strong>4</strong> Entidades (1 fraca)</span>
+        <span class="meta-pill">🔗 <strong>6</strong> Relacionamentos</span>
+        <span class="meta-pill">🕒 Gerado em: 26/09/2026 às 16:05</span>
+      </div>
+    </div>
+
+    <div class="section-header">
+      <span>🏛 Tipos de Entidade e Atributos</span>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>FUNCIONARIO</span>
+        </div>
+        <span class="badge badge-strong">Entidade Regular / Forte</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Atributo</th>
+            <th>Tipo de Dado</th>
+            <th>Notação de Chen (Navathe)</th>
+            <th>Restrição</th>
+          </tr>
+        </thead>
+        <tbody>
+
+          <tr>
+            <td><code>Nome</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-comp" title="Composto: Ramificado">🌳 Composto (<code>Pnome</code>, <code>Minicial</code>, <code>Unome</code>)</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Cpf</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-pk" title="Chave Primária: Elipse simples com texto sublinhado sólido">🔑 Chave Primária (PK)</span></td>
+            <td><span style="color:#15803d;font-weight:600;">NOT NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Datanasc</code></td>
+            <td><code>DATE</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Endereco</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Salario</code></td>
+            <td><code>DECIMAL</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Sexo</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>DEPARTAMENTO</span>
+        </div>
+        <span class="badge badge-strong">Entidade Regular / Forte</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Atributo</th>
+            <th>Tipo de Dado</th>
+            <th>Notação de Chen (Navathe)</th>
+            <th>Restrição</th>
+          </tr>
+        </thead>
+        <tbody>
+
+          <tr>
+            <td><code>Nome</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-pk" title="Chave Primária: Elipse simples com texto sublinhado sólido">🔑 Chave Primária (PK)</span></td>
+            <td><span style="color:#15803d;font-weight:600;">NOT NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Localizacoes</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-multi" title="Multivalorado: Elipse dupla">⭕⭕ Multivalorado</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Numero</code></td>
+            <td><code>INTEGER</code></td>
+            <td><span class="badge badge-pk" title="Chave Primária: Elipse simples com texto sublinhado sólido">🔑 Chave Primária (PK)</span></td>
+            <td><span style="color:#15803d;font-weight:600;">NOT NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Numero_funcionarios</code></td>
+            <td><code>INTEGER</code></td>
+            <td><span class="badge badge-derived" title="Derivado: Elipse com borda tracejada">⚡ Derivado</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>PROJETO</span>
+        </div>
+        <span class="badge badge-strong">Entidade Regular / Forte</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Atributo</th>
+            <th>Tipo de Dado</th>
+            <th>Notação de Chen (Navathe)</th>
+            <th>Restrição</th>
+          </tr>
+        </thead>
+        <tbody>
+
+          <tr>
+            <td><code>Nome</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-pk" title="Chave Primária: Elipse simples com texto sublinhado sólido">🔑 Chave Primária (PK)</span></td>
+            <td><span style="color:#15803d;font-weight:600;">NOT NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Numero</code></td>
+            <td><code>INTEGER</code></td>
+            <td><span class="badge badge-pk" title="Chave Primária: Elipse simples com texto sublinhado sólido">🔑 Chave Primária (PK)</span></td>
+            <td><span style="color:#15803d;font-weight:600;">NOT NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Localizacao</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>DEPENDENTE</span>
+        </div>
+        <span class="badge badge-weak">Entidade Fraca (Retângulo Duplo)</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Atributo</th>
+            <th>Tipo de Dado</th>
+            <th>Notação de Chen (Navathe)</th>
+            <th>Restrição</th>
+          </tr>
+        </thead>
+        <tbody>
+
+          <tr>
+            <td><code>Nome</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-partial" title="Chave Parcial / Discriminador: Elipse simples com sublinhado tracejado">🏷️ Chave Parcial</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Sexo</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Data_nascimento</code></td>
+            <td><code>DATE</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+          <tr>
+            <td><code>Parentesco</code></td>
+            <td><code>STRING</code></td>
+            <td><span class="badge badge-simple">Atômico / Simples</span></td>
+            <td><span style="color:#94a3b8;">NULL</span></td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-header">
+      <span>🔗 Tipos de Relacionamento e Restrições</span>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>SUPERVISAO</span>
+          <span class="badge badge-comp">Razão: 1:N</span>
+        </div>
+        <span class="badge badge-simple">Regular</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">FUNCIONARIO</div>
+        <div class="line-indicator">
+          <span>Supervisor (1)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box">
+          <span>SUPERVISAO</span>
+        </div>
+        <div class="line-indicator">
+          <span>Supervisionado (N)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="entity-box">FUNCIONARIO</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>TRABALHA_PARA</span>
+          <span class="badge badge-comp">Razão: N:1</span>
+        </div>
+        <span class="badge badge-simple">Regular</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">FUNCIONARIO</div>
+        <div class="line-indicator">
+          <span>(N)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box">
+          <span>TRABALHA_PARA</span>
+        </div>
+        <div class="line-indicator">
+          <span>(1)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="entity-box">DEPARTAMENTO</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>GERENCIA</span>
+          <span class="badge badge-comp">Razão: 1:1</span>
+        </div>
+        <span class="badge badge-simple">Regular</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">FUNCIONARIO</div>
+        <div class="line-indicator">
+          <span>(1)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box">
+          <span>GERENCIA</span>
+        </div>
+        <div class="line-indicator">
+          <span>(1)</span>
+          <div class="line-bar double"></div>
+          <span>Total (dupla)</span>
+        </div>
+        <div class="entity-box">DEPARTAMENTO</div>
+      </div>
+
+      <div class="rel-meta">
+        <span><strong>Atributos do Relacionamento:</strong> <span class="badge badge-simple"><code>Data_inicio: DATE</code></span></span>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>CONTROLA</span>
+          <span class="badge badge-comp">Razão: 1:N</span>
+        </div>
+        <span class="badge badge-simple">Regular</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">DEPARTAMENTO</div>
+        <div class="line-indicator">
+          <span>(1)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box">
+          <span>CONTROLA</span>
+        </div>
+        <div class="line-indicator">
+          <span>(N)</span>
+          <div class="line-bar double"></div>
+          <span>Total (dupla)</span>
+        </div>
+        <div class="entity-box">PROJETO</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>TRABALHA_EM</span>
+          <span class="badge badge-comp">Razão: M:N</span>
+        </div>
+        <span class="badge badge-simple">Regular</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">FUNCIONARIO</div>
+        <div class="line-indicator">
+          <span>(M)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box">
+          <span>TRABALHA_EM</span>
+        </div>
+        <div class="line-indicator">
+          <span>(N)</span>
+          <div class="line-bar double"></div>
+          <span>Total (dupla)</span>
+        </div>
+        <div class="entity-box">PROJETO</div>
+      </div>
+
+      <div class="rel-meta">
+        <span><strong>Atributos do Relacionamento:</strong> <span class="badge badge-simple"><code>Horas: DECIMAL</code></span></span>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <span>DEPENDENTES_DE</span>
+          <span class="badge badge-comp">Razão: 1:N</span>
+        </div>
+        <span class="badge badge-weak">Identificador (Losango Duplo)</span>
+      </div>
+      <div class="rel-flow">
+        <div class="entity-box">FUNCIONARIO</div>
+        <div class="line-indicator">
+          <span>(1)</span>
+          <div class="line-bar"></div>
+          <span>Parcial</span>
+        </div>
+        <div class="diamond-box identifying">
+          <span>DEPENDENTES_DE</span>
+        </div>
+        <div class="line-indicator">
+          <span>(N)</span>
+          <div class="line-bar double"></div>
+          <span>Total (dupla)</span>
+        </div>
+        <div class="entity-box weak">DEPENDENTE</div>
+      </div>
+
+    </div>
+
+  </div>
+</body>
+</html>
