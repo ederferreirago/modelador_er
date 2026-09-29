@@ -7,7 +7,7 @@ Aplicativo desktop em Python/Tkinter para modelagem conceitual e lógica de banc
 ## 👨‍💻 Autor & Contribuição
 
 * **Autor:** Eder Ferreira De Souza
-* **LinkedIn:** [linkedin.com/in/eder-ferreira-de-souza](https://www.linkedin.com/in/ederferreira)
+* **LinkedIn:** [linkedin.com/in/ederferreira](https://www.linkedin.com/in/ederferreira)
 * **GitHub:** [github.com/ederferreirago](https://github.com/ederferreirago)
 
 Este projeto é **open source** e foi desenvolvido para a comunidade acadêmica e de profissionais de TI. Fique à vontade para **abrir *Issues*** com sugestões/bugs, fazer um ** *Fork*** do repositório e enviar seus ** *Pull Requests*** com melhorias e novas funcionalidades!
