@@ -1,3 +1,5 @@
 # Tkinter já vem embutido no Python (padrão no instalador oficial do Windows).
-# reportlab é necessário apenas para a exportação em PDF.
+# reportlab: necessário apenas para a exportação em PDF.
 reportlab>=4.0
+# oracledb: necessário apenas para conectar no Oracle (modo thin: dispensa o Oracle Client).
+oracledb>=2.0

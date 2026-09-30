@@ -23,6 +23,9 @@ from models import Project, Entity, Relationship, Attribute, Specialization, new
 from ddl_generator import generate_ddl, generate_kimball_ddl
 import report_export
 import validator
+import barker_router as router
+import datetime
+from oracle_dialog import OracleDialog
 from dialogs import (EntityDialog, CardinalityDialog, RelationshipDialog, DDLWindow,
                      DomainManagerDialog, SpecializationDialog, ValidationWindow)
 
@@ -100,6 +103,8 @@ class App(tk.Tk):
         self._rc_moved = False
         self._last_nudge = 0.0
         self._bk_cache = None
+        self._bk_route_cache = None
+        self._fast_routing = False
         self._mouse_model = (0, 0)
         self.global_attr_spacing = 90.0
         self.show_grid = True
@@ -815,13 +820,21 @@ class App(tk.Tk):
         ttk.Combobox(g_dialect, textvariable=self.dialect_var, width=11, state="readonly",
                      values=["postgres", "mysql", "oracle"]).pack(side="left", padx=2, pady=4)
 
-        g_ddl = self._create_ribbon_group(panel, "Geração de DDL")
-        ttk.Button(g_ddl, text="⚙ DDL Relacional (F9)", command=self.show_ddl).pack(side="left", padx=4, pady=4)
-        ttk.Button(g_ddl, text="⭐ DDL Dimensional (Kimball)", command=self.show_kimball_ddl).pack(side="left", padx=4, pady=4)
+        g_ddl = self._create_ribbon_group(panel, "Ver DDL")
+        ttk.Button(g_ddl, text="⚙ Transacional (F9)", command=self.show_ddl).pack(side="left", padx=3, pady=4)
+        ttk.Button(g_ddl, text="⭐ Dimensional", command=self.show_kimball_ddl).pack(side="left", padx=3, pady=4)
+
+        g_save = self._create_ribbon_group(panel, "Gravar DDL (.sql)")
+        ttk.Button(g_save, text="💾 Transacional…", command=lambda: self.save_ddl("transacional")).pack(side="left", padx=3, pady=4)
+        ttk.Button(g_save, text="💾 Dimensional…", command=lambda: self.save_ddl("dimensional")).pack(side="left", padx=3, pady=4)
+        ttk.Button(g_save, text="💾 Ambos…", command=lambda: self.save_ddl("ambos")).pack(side="left", padx=3, pady=4)
+
+        g_ora = self._create_ribbon_group(panel, "Oracle")
+        ttk.Button(g_ora, text="🔌 Verificar e criar no Oracle…", command=self.open_oracle).pack(side="left", padx=3, pady=4)
 
         g_dom = self._create_ribbon_group(panel, "Qualidade do Modelo")
-        ttk.Button(g_dom, text="📚 Domínios…", command=self.open_domains).pack(side="left", padx=4, pady=4)
-        ttk.Button(g_dom, text="✔ Validar Modelo (F5)", command=self.validate_model).pack(side="left", padx=4, pady=4)
+        ttk.Button(g_dom, text="📚 Domínios…", command=self.open_domains).pack(side="left", padx=3, pady=4)
+        ttk.Button(g_dom, text="✔ Validar (F5)", command=self.validate_model).pack(side="left", padx=3, pady=4)
 
     def _build_tab_export(self):
         panel = tk.Frame(self.ribbon_container, bg="#ffffff")
@@ -1466,6 +1479,8 @@ class App(tk.Tk):
                     attr.offset_x = (mx - self.drag_offset_x) - rmx
                     attr.offset_y = (my - self.drag_offset_y) - rmy
         self._drag_moved = True
+        if self.notation == "barker" and len(self.project.rels) > 8:
+            self._fast_routing = True      # cotovelos simples durante o arrasto; rota completa ao soltar
         self._mark_active_dirty()
         self._schedule_render()
 
@@ -1502,6 +1517,9 @@ class App(tk.Tk):
         self._drag_prestate = None
         self._drag_moved = False
         self.drag_target = None
+        if self._fast_routing:
+            self._fast_routing = False
+            self.render()
 
     def on_canvas_double_click(self, event):
         if self.link_mode or self.nary_mode or self.zoom_select_mode:
@@ -2889,68 +2907,134 @@ class App(tk.Tk):
         d = math.hypot(x2 - x1, y2 - y1) or 1.0
         return (x2 - x1) / d, (y2 - y1) / d
 
+    def _bk_nary_box(self, r):
+        cx, cy = self._rel_pos(r)
+        tw = self._text_metrics(r.name, ("Segoe UI", 8, "bold"))[0]
+        bw, bh = max(90, tw + 26), 26
+        return (cx - bw / 2, cy - bh / 2, bw, bh)
+
+    def _bk_routes(self):
+        """Rotas ortogonais de todos os relacionamentos (cache até a geometria mudar)."""
+        L = self._bk_layout()
+        rects, edges, ancestors = {}, [], {}
+        parent_of = {}
+        for sp in self.project.specs:
+            if not sp.is_union and sp.parent_ids:
+                for cid in sp.child_ids:
+                    if cid in L and sp.parent_ids[0] in L and L[cid]["depth"] > 0:
+                        parent_of.setdefault(cid, sp.parent_ids[0])
+
+        def chain(eid):
+            out, cur, guard = set(), parent_of.get(eid), 0
+            while cur and guard < 20:
+                out.add(cur)
+                cur = parent_of.get(cur)
+                guard += 1
+            return out
+        for eid, v in L.items():
+            rects[eid] = (v["x"], v["y"], v["w"], v["h"])
+        for r in self.project.rels:
+            if r.is_nary:
+                if any(self.project.find_entity(i) is None for i, *_ in r.participants()):
+                    continue
+                rects["box:" + r.id] = self._bk_nary_box(r)
+        for r in self.project.rels:
+            if r.is_nary:
+                if "box:" + r.id not in rects:
+                    continue
+                for i, (eid, *_rest) in enumerate(r.participants()):
+                    if eid in rects:
+                        edges.append({"key": (r.id, i), "a": eid, "b": "box:" + r.id, "ignore": chain(eid),
+                                      "sides_a": ("bottom",) if eid in parent_of else tuple(router.NORMALS)})
+            else:
+                e1, e2 = r.entity1_id, r.entity2_id
+                if e1 == e2 or e1 not in rects or e2 not in rects:
+                    continue
+                edges.append({"key": (r.id, 0), "a": e1, "b": e2, "ignore": chain(e1) | chain(e2),
+                              "sides_a": ("bottom",) if e1 in parent_of else tuple(router.NORMALS),
+                              "sides_b": ("bottom",) if e2 in parent_of else tuple(router.NORMALS)})
+        sig = (tuple(sorted((k, round(v[0], 1), round(v[1], 1), round(v[2], 1), round(v[3], 1)) for k, v in rects.items())),
+               tuple((e["key"], e["a"], e["b"]) for e in edges), self._fast_routing)
+        if self._bk_route_cache and self._bk_route_cache[0] == sig:
+            return self._bk_route_cache[1]
+        routes = router.route_edges(rects, edges, fast=self._fast_routing) if edges else {}
+        self._bk_port_use = {}
+        for e in edges:
+            rt = routes.get(e["key"])
+            if rt:
+                for eid, n in ((e["a"], rt["na"]), (e["b"], rt["nb"])):
+                    self._bk_port_use[(eid, n)] = self._bk_port_use.get((eid, n), 0) + 1
+        self._bk_route_cache = (sig, routes)
+        return routes
+
     def _bk_rel_geom(self, r):
         """Geometria do relacionamento em Barker (modelo): metades, pés-de-galinha, barras de UID, rótulo."""
         parts = [(self.project.find_entity(eid), card, part, role) for eid, card, part, role in r.participants()]
         if any(p[0] is None for p in parts):
             return None
-        L = self._bk_layout()
         many = lambda c: str(c).upper() in ("N", "M")
         if r.is_nary:
-            cx, cy = self._rel_pos(r)
-            tw = self._text_metrics(r.name, ("Segoe UI", 8, "bold"))[0]
-            bw, bh = max(90, tw + 26), 26
-            box = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
+            box = self._bk_nary_box(r)
+            routes = self._bk_routes()
             halves = []
-            for ent, card, part, role in parts:
-                x, y, w, h = self._ent_box(ent)
-                P = self._rect_border_point(x, y, w, h, cx, cy)
-                Q = self._rect_border_point(box[0], box[1], bw, bh, P[0], P[1])
-                u_q = self._unit(Q[0], Q[1], P[0], P[1])
-                halves.append({"pts": [P, Q], "dashed": False, "feet": [(Q, u_q)],
-                               "bars": [(P, self._unit(P[0], P[1], Q[0], Q[1]))] if card == "1" else [],
-                               "role": role, "role_at": P, "u": self._unit(P[0], P[1], Q[0], Q[1])})
-            return {"halves": halves, "label": (cx, cy), "box": box, "nary": True}
+            for i, (ent, card, part, role) in enumerate(parts):
+                rt = routes.get((r.id, i))
+                if not rt:
+                    continue
+                pts = rt["pts"]
+                # o pé-de-galinha fica no lado da caixa de interseção; a barra no lado da entidade (card 1)
+                halves.append({"pts": pts, "dashed": False,
+                               "feet": [(pts[-1], (-rt["nb"][0], -rt["nb"][1]))],
+                               "bars": [(pts[0], rt["na"])] if str(card) == "1" else [],
+                               "role": role, "role_at": pts[0], "u": rt["na"]})
+            cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+            return {"halves": halves, "label": (cx, cy), "box": (box[0], box[1], box[0] + box[2], box[1] + box[3]),
+                    "nary": True}
         (e1, c1, p1, r1), (e2, c2, p2, r2) = parts[0], parts[1]
         uid_end = None
         if r.is_identifying:
             uid_end = 0 if e1.is_weak and not e2.is_weak else 1
         if e1.id == e2.id:
             x, y, w, h = self._ent_box(e1)
-            xa, ya, xb, yb = x + w, y + h * 0.28, x + w, y + h * 0.72
-            out = x + w + 46
-            mid = (out, (ya + yb) / 2)
-            halves = []
-            for idx, (pt, pt2, card, part, role) in enumerate(((( xa, ya), (out, ya), c1, p1, r1),
-                                                               ((xb, yb), (out, yb), c2, p2, r2))):
-                u = (1.0, 0.0)
-                halves.append({"pts": [pt, pt2, mid], "dashed": part != "total",
-                               "feet": [(pt, u)] if many(card) else [],
-                               "bars": [(pt, u)] if uid_end == idx else [],
-                               "role": role, "role_at": pt2, "u": (0, 1 if idx == 0 else -1)})
-            return {"halves": halves, "label": (out + 8, mid[1]), "box": None, "self": True}
-        b1, b2 = self._ent_box(e1), self._ent_box(e2)
-        cc1 = (b1[0] + b1[2] / 2, b1[1] + b1[3] / 2)
-        cc2 = (b2[0] + b2[2] / 2, b2[1] + b2[3] / 2)
-        # vários relacionamentos entre o mesmo par: abre em leque para não sobrepor linhas e rótulos
-        pair = {e1.id, e2.id}
-        same = [x for x in self.project.rels if not x.is_nary and {x.entity1_id, x.entity2_id} == pair
-                and x.entity1_id != x.entity2_id]
-        if len(same) > 1:
+            self._bk_routes()
+            use = getattr(self, "_bk_port_use", {})
+            order = [("right", (1, 0)), ("left", (-1, 0)), ("bottom", (0, 1)), ("top", (0, -1))]
+            same = [q for q in self.project.rels if not q.is_nary and q.entity1_id == q.entity2_id == e1.id]
             k = same.index(r) if r in same else 0
-            ux, uy = self._unit(cc1[0], cc1[1], cc2[0], cc2[1])
-            off = (k - (len(same) - 1) / 2) * 44
-            sx_, sy_ = -uy * off, ux * off
-            cc1, cc2 = (cc1[0] + sx_, cc1[1] + sy_), (cc2[0] + sx_, cc2[1] + sy_)
-        P1 = self._rect_border_point(*b1, cc2[0], cc2[1])
-        P2 = self._rect_border_point(*b2, cc1[0], cc1[1])
-        M = ((P1[0] + P2[0]) / 2, (P1[1] + P2[1]) / 2)
-        u1, u2 = self._unit(P1[0], P1[1], M[0], M[1]), self._unit(P2[0], P2[1], M[0], M[1])
+            side, n = min(order, key=lambda o: (use.get((e1.id, o[1]), 0), order.index(o)))
+            if n[1] == 0:      # lado vertical (direita/esquerda)
+                px = x + w if n[0] > 0 else x
+                a1, a2 = (px, y + h * 0.28), (px, y + h * 0.72)
+            else:
+                py = y + h if n[1] > 0 else y
+                a1, a2 = (x + w * 0.28, py), (x + w * 0.72, py)
+            reach = 46 + 26 * k
+            b1 = (a1[0] + n[0] * reach, a1[1] + n[1] * reach)
+            b2 = (a2[0] + n[0] * reach, a2[1] + n[1] * reach)
+            mid = ((b1[0] + b2[0]) / 2, (b1[1] + b2[1]) / 2)
+            halves = []
+            for idx, (pt, pt2, card, part, role) in enumerate(((a1, b1, c1, p1, r1), (a2, b2, c2, p2, r2))):
+                d = math.hypot(pt2[0] - mid[0], pt2[1] - mid[1]) or 1.0
+                away = ((pt2[0] - mid[0]) / d, (pt2[1] - mid[1]) / d)       # para fora do par de conectores
+                halves.append({"pts": [pt, pt2, mid], "dashed": part != "total",
+                               "feet": [(pt, n)] if many(card) else [],
+                               "bars": [(pt, n)] if uid_end == idx else [],
+                               "role": role,
+                               "role_at": (pt[0] + n[0] * 24 + away[0] * 10, pt[1] + n[1] * 24 + away[1] * 10),
+                               "u": (0, 0)})
+            anchor = "w" if n[0] > 0 else ("e" if n[0] < 0 else "center")
+            lab = (mid[0] + n[0] * 8, mid[1] + n[1] * 12)
+            return {"halves": halves, "label": lab, "box": None, "self": True, "anchor": anchor}
+        rt = self._bk_routes().get((r.id, 0))
+        if not rt:
+            return None
+        h1, h2, M = router.split_at_midpoint(rt["pts"])
+        n1, n2 = rt["na"], rt["nb"]
         halves = [
-            {"pts": [P1, M], "dashed": p1 != "total", "feet": [(P1, u1)] if many(c1) else [],
-             "bars": [(P1, u1)] if uid_end == 0 else [], "role": r1, "role_at": P1, "u": u1},
-            {"pts": [P2, M], "dashed": p2 != "total", "feet": [(P2, u2)] if many(c2) else [],
-             "bars": [(P2, u2)] if uid_end == 1 else [], "role": r2, "role_at": P2, "u": u2},
+            {"pts": h1, "dashed": p1 != "total", "feet": [(h1[0], n1)] if many(c1) else [],
+             "bars": [(h1[0], n1)] if uid_end == 0 else [], "role": r1, "role_at": h1[0], "u": n1},
+            {"pts": h2, "dashed": p2 != "total", "feet": [(h2[0], n2)] if many(c2) else [],
+             "bars": [(h2[0], n2)] if uid_end == 1 else [], "role": r2, "role_at": h2[0], "u": n2},
         ]
         return {"halves": halves, "label": M, "box": None}
 
@@ -3009,6 +3093,24 @@ class App(tk.Tk):
                                     font=self.font_scaled("Segoe UI", 7.5, "italic"),
                                     fill="#4263EB" if self.selected_item == ("spec", sp.id) else "#0f766e")
 
+    def _rounded_pts(self, pts, radius):
+        """Pontos de controle para suavizar cantos ortogonais (raio em unidades de tela)."""
+        if len(pts) < 3 or radius <= 0:
+            return [c for p in pts for c in p], False
+        out = [pts[0]]
+        for i in range(1, len(pts) - 1):
+            a, b, c = pts[i - 1], pts[i], pts[i + 1]
+            la, lc = math.hypot(b[0] - a[0], b[1] - a[1]), math.hypot(c[0] - b[0], c[1] - b[1])
+            r = min(radius, la / 2.0, lc / 2.0)
+            if r < 1:
+                out.append(b)
+                continue
+            out.append((b[0] + (a[0] - b[0]) / la * r, b[1] + (a[1] - b[1]) / la * r))
+            out.append(b)
+            out.append((b[0] + (c[0] - b[0]) / lc * r, b[1] + (c[1] - b[1]) / lc * r))
+        out.append(pts[-1])
+        return [c for p in out for c in p], True
+
     def _draw_bk_relationship(self, r):
         g = self._bk_rel_geom(r)
         if not g:
@@ -3018,9 +3120,12 @@ class App(tk.Tk):
         col = "#4263EB" if selected else "#42506B"
         lw = max(1.4, 2.0 * z) if selected else max(1.2, 1.5 * z)
         for half in g["halves"]:
-            pts = [c for p in half["pts"] for c in self.to_screen(*p)]
+            spts = [self.to_screen(*p) for p in half["pts"]]
+            coords, smooth = self._rounded_pts(spts, 7 * z)
             kw = {"dash": (max(4, int(7 * z)), max(3, int(4 * z)))} if half["dashed"] else {}
-            self.canvas.create_line(*pts, fill=col, width=lw, **kw)
+            if smooth:
+                kw.update(smooth=True, splinesteps=8)
+            self.canvas.create_line(*coords, fill=col, width=lw, **kw)
             for (px, py), (ux, uy) in half["feet"]:
                 sx, sy = self.to_screen(px, py)
                 L_, W_ = 13 * z, 6.5 * z
@@ -3037,8 +3142,8 @@ class App(tk.Tk):
                 px, py = half["role_at"]
                 ux, uy = half["u"]
                 sx, sy = self.to_screen(px, py)
-                self.canvas.create_text(sx + ux * 38 * z - uy * 10 * z, sy + uy * 38 * z + ux * 10 * z, text=half["role"],
-                                        font=self.font_scaled("Segoe UI", 7.5, "italic"), fill="#475569")
+                self._draw_label_with_halo(sx + ux * 34 * z - uy * 11 * z, sy + uy * 34 * z + ux * 11 * z, half["role"],
+                                           self.font_scaled("Segoe UI", 7, "italic"))
         lx, ly = self.to_screen(*g["label"])
         if g["box"]:
             x1, y1 = self.to_screen(g["box"][0], g["box"][1])
@@ -3046,7 +3151,8 @@ class App(tk.Tk):
             self._round_rect(x1, y1, x2, y2, 7 * z, fill="#F1ECFF", outline=col, width=lw)
             self.canvas.create_text(lx, ly, text=r.name, font=self.font_scaled("Segoe UI", 8, "bold"), fill="#18233D")
         elif g.get("self"):
-            self.canvas.create_text(lx, ly, text=r.name, anchor="w", font=self.font_scaled("Segoe UI", 8, "bold"), fill="#18233D")
+            self.canvas.create_text(lx, ly, text=r.name, anchor=g.get("anchor", "w"),
+                                    font=self.font_scaled("Segoe UI", 8, "bold"), fill="#18233D")
         else:
             self._draw_label_with_halo(lx, ly, r.name, self.font_scaled("Segoe UI", 8, "bold"))
 
@@ -3159,3 +3265,65 @@ DOMÍNIOS
         txt.config(state="disabled")
         ttk.Button(win, text="Fechar", command=win.destroy).pack(pady=6)
         win.bind("<Escape>", lambda e: win.destroy())
+
+    # ---------------- Gravar DDL / Oracle ----------------
+    def _ddl_body(self, kind, dialect):
+        if kind == "dimensional":
+            return generate_kimball_ddl(self.project, dialect)
+        return generate_ddl(self.project, dialect)
+
+    def _ddl_file_text(self, kind, dialect):
+        name = self.active_document["name"]
+        head = (f"-- Projeto: {name}\n-- Modelo: {kind}\n-- Dialeto: {dialect.upper()}\n"
+                f"-- Gerado em: {datetime.datetime.now():%Y-%m-%d %H:%M}\n")
+        if dialect == "oracle":
+            head += "SET DEFINE OFF\n"      # evita que o SQL*Plus trate '&' dos comentários como variável
+        text = self._ddl_body(kind, dialect).rstrip() + "\n"
+        return head + "\n" + text
+
+    def _can_save_kind(self, kind):
+        if kind == "dimensional":
+            if not any(e.kimball_role in ("dimension", "fact") for e in self.project.entities):
+                messagebox.showinfo("DDL dimensional", "Nenhuma entidade está marcada como Dimensão ou Fato.\n"
+                                                       "Edite a entidade (duplo-clique) e defina o 'Papel Dimensional'.")
+                return False
+            return True
+        return self._confirm_validation()
+
+    def save_ddl(self, kind):
+        """Grava o DDL transacional, dimensional ou ambos em arquivos .sql."""
+        dialect = self.dialect_var.get()
+        kinds = ["transacional", "dimensional"] if kind == "ambos" else [kind]
+        if not all(self._can_save_kind(k) for k in kinds):
+            return
+        base = self.active_document["name"].replace(" ", "_")
+        try:
+            if len(kinds) == 1:
+                path = filedialog.asksaveasfilename(defaultextension=".sql", initialfile=f"{base}_{kinds[0]}_{dialect}.sql",
+                                                    filetypes=[("SQL", "*.sql")], title=f"Gravar DDL {kinds[0]}")
+                if not path:
+                    return
+                paths = {kinds[0]: path}
+            else:
+                folder = filedialog.askdirectory(title="Pasta para gravar os DDLs transacional e dimensional")
+                if not folder:
+                    return
+                paths = {k: os.path.join(folder, f"{base}_{k}_{dialect}.sql") for k in kinds}
+            for k, p in paths.items():
+                with open(p, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(self._ddl_file_text(k, dialect))
+        except OSError as ex:
+            messagebox.showerror("Gravar DDL", f"Não foi possível gravar:\n{ex}")
+            return
+        self.status_msg.config(text="DDL gravado: " + "; ".join(paths.values()))
+        messagebox.showinfo("Gravar DDL", "Arquivo(s) gravado(s):\n\n" + "\n".join(paths.values()))
+
+    def open_oracle(self):
+        """Conecta no Oracle, compara o modelo com o dicionário de dados e cria as tabelas em um schema."""
+        def statements(kind):
+            if kind == "dimensional" and not any(e.kimball_role in ("dimension", "fact") for e in self.project.entities):
+                raise ValueError("Nenhuma entidade marcada como Dimensão ou Fato.")
+            if kind == "transacional" and not self._confirm_validation():
+                raise ValueError("Geração cancelada: corrija os erros do modelo.")
+            return [self._ddl_body(kind, "oracle")]
+        OracleDialog(self, statements)
