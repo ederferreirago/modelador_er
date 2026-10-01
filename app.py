@@ -26,6 +26,7 @@ import validator
 import barker_router as router
 import datetime
 from oracle_dialog import OracleDialog
+import oracle_tools
 from dialogs import (EntityDialog, CardinalityDialog, RelationshipDialog, DDLWindow,
                      DomainManagerDialog, SpecializationDialog, ValidationWindow)
 
@@ -64,6 +65,48 @@ def _enable_windows_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()
         except (AttributeError, OSError):
             pass
+
+
+class Tooltip:
+    """Dica flutuante simples (aparece após 600 ms sobre o widget)."""
+
+    def __init__(self, widget, text):
+        self.widget, self.text, self.tip, self._job = widget, text, None, None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self._hide()
+        self._job = self.widget.after(600, self._show)
+
+    def _show(self):
+        if self.tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 8
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            tk.Label(self.tip, text=self.text, bg="#25304A", fg="#ffffff", font=("Segoe UI", 8),
+                     padx=8, pady=3, justify="left").pack()
+        except tk.TclError:
+            self.tip = None
+
+    def _hide(self, _e=None):
+        if self._job:
+            try:
+                self.widget.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+        if self.tip:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
 
 
 class App(tk.Tk):
@@ -106,6 +149,10 @@ class App(tk.Tk):
         self._bk_route_cache = None
         self._fast_routing = False
         self._mouse_model = (0, 0)
+        self.oracle = oracle_tools.OracleSession()   # conexão Oracle: vive enquanto o app estiver aberto
+        self._oracle_dlg = None
+        self._search_key, self._search_idx = None, 0
+        self.ribbon_visible = True
         self.global_attr_spacing = 90.0
         self.show_grid = True
         self.sidebar_visible = True
@@ -144,9 +191,11 @@ class App(tk.Tk):
         self._configure_styles()
         self._build_office_header()
         self._build_office_ribbon()
+        self._build_quick_toolbar()
         self._build_document_tabs()
         self._build_main_area()
         self._build_office_statusbar()
+        self._build_menubar()
 
         self.protocol("WM_DELETE_WINDOW", self.close_application)
         self._refresh_document_tabs()
@@ -175,7 +224,7 @@ class App(tk.Tk):
             "<Control-0>": self.zoom_fit, "<Control-1>": self.zoom_reset,
             "<Control-plus>": self.zoom_in, "<Control-equal>": self.zoom_in, "<Control-minus>": self.zoom_out,
             "<Delete>": self.delete_selected, "<F2>": self.edit_selected_from_inspector,
-            "<Return>": self._on_return_key, "<Control-l>": self.toggle_link,
+            "<Return>": self._on_return_key, "<Control-l>": self.toggle_link, "<Control-f>": self.focus_search,
             "<Control-g>": self.toggle_grid_key, "<F5>": self.validate_model,
             "<F9>": self.show_ddl, "<F1>": self.show_help,
         }
@@ -460,6 +509,10 @@ class App(tk.Tk):
         style.configure("RibbonGroupTitle.TLabel", background="#ffffff", foreground="#73809B", font=("Segoe UI", 7, "bold"))
         style.configure("RibbonBtn.TButton", font=("Segoe UI", 8), padding=(4, 2))
         style.configure("Side.TButton", font=("Segoe UI", 8, "bold"), padding=(6, 2))
+        style.configure("Tool.TButton", font=("Segoe UI", 9), padding=(7, 3), background="#FFFFFF")
+        style.configure("Tool.Toolbutton", font=("Segoe UI", 9), padding=(7, 3), background="#FFFFFF")
+        style.map("Tool.Toolbutton", background=[("selected", "#DDD6FE"), ("active", "#EEEAFE")],
+                  foreground=[("selected", "#3E2FAF")])
 
     # ---------------- Barra Superior Office 365 (Header) ----------------
     def _build_office_header(self):
@@ -535,14 +588,21 @@ class App(tk.Tk):
             btn.pack(side="left", padx=1)
             self.tab_buttons[tab_id] = btn
 
+        self.ribbon_toggle_btn = tk.Button(tab_bar, text="▲", relief="flat", bd=0, bg="#F4F6FC", fg="#42506B",
+                                           font=("Segoe UI", 9), padx=10, command=self.toggle_ribbon, cursor="hand2")
+        self.ribbon_toggle_btn.pack(side="right", padx=6)
+        self._tip(self.ribbon_toggle_btn, "Recolher/expandir a faixa de opções (mais espaço para o diagrama) · Ctrl+F1")
+        for b in self.tab_buttons.values():
+            b.bind("<Double-Button-1>", lambda _e: self.toggle_ribbon())
+
         # Container dos Painéis do Ribbon
-        self.ribbon_container = tk.Frame(ribbon_wrapper, bg="#ffffff", height=92, bd=0)
+        self.ribbon_container = tk.Frame(ribbon_wrapper, bg="#ffffff", height=84, bd=0)
         self.ribbon_container.pack(side="top", fill="x")
         self.ribbon_container.pack_propagate(False)
 
         # Linha divisória sutil
-        sep = tk.Frame(ribbon_wrapper, bg="#D9DFEC", height=1)
-        sep.pack(side="top", fill="x")
+        self.ribbon_sep = tk.Frame(ribbon_wrapper, bg="#D9DFEC", height=1)
+        self.ribbon_sep.pack(side="top", fill="x")
 
         # Constrói os painéis de cada aba
         self._build_tab_home()
@@ -554,6 +614,8 @@ class App(tk.Tk):
         self.switch_ribbon_tab("home")
 
     def switch_ribbon_tab(self, tab_id):
+        if not self.ribbon_visible:
+            self.toggle_ribbon()
         self.active_ribbon_tab = tab_id
         for tid, btn in self.tab_buttons.items():
             if tid == tab_id:
@@ -567,23 +629,24 @@ class App(tk.Tk):
             else:
                 panel.pack_forget()
 
+    def toggle_ribbon(self):
+        """Recolhe/expande os botões da faixa de opções (as abas continuam visíveis)."""
+        if self.ribbon_visible:
+            self.ribbon_container.pack_forget()
+            self.ribbon_toggle_btn.config(text="▼")
+        else:
+            self.ribbon_container.pack(side="top", fill="x", before=self.ribbon_sep)
+            self.ribbon_toggle_btn.config(text="▲")
+        self.ribbon_visible = not self.ribbon_visible
+        if hasattr(self, "ribbon_var"):
+            self.ribbon_var.set(self.ribbon_visible)
+
     def _build_document_tabs(self):
-        self.document_tabs = tk.Frame(self, bg="#E9ECF6", height=38)
+        self.document_tabs = tk.Frame(self, bg="#E9ECF6", height=36)
         self.document_tabs.pack(side="top", fill="x")
         self.document_tabs.pack_propagate(False)
         self.document_tab_items = tk.Frame(self.document_tabs, bg="#E9ECF6")
         self.document_tab_items.pack(side="left", fill="y")
-        actions = tk.Frame(self.document_tabs, bg="#E9ECF6")
-        actions.pack(side="right", padx=8)
-        tk.Button(actions, text="＋ Novo projeto", relief="flat", bd=0,
-                  bg="#E9ECF6", fg="#4938D0", font=("Segoe UI", 9, "bold"),
-                  command=self.new_project).pack(side="left", padx=4)
-        tk.Button(actions, text="Abrir…", relief="flat", bd=0,
-                  bg="#E9ECF6", fg="#42506B", font=("Segoe UI", 9),
-                  command=self.load_project).pack(side="left", padx=4)
-        tk.Button(actions, text="Salvar como…", relief="flat", bd=0,
-                  bg="#E9ECF6", fg="#42506B", font=("Segoe UI", 9),
-                  command=self.save_project_as).pack(side="left", padx=4)
 
     def _refresh_document_tabs(self):
         if not hasattr(self, "document_tab_items"):
@@ -719,6 +782,10 @@ class App(tk.Tk):
                 d["dirty"] = False
             # "Não": o rascunho de recuperação continua disponível na próxima abertura
         self._flush_autosaves()
+        try:
+            self.oracle.close()
+        except Exception:
+            pass
         self.destroy()
 
     def _build_tab_home(self):
@@ -726,41 +793,23 @@ class App(tk.Tk):
         self.ribbon_panels["home"] = panel
 
         g_model = self._create_ribbon_group(panel, "Modelagem")
-        ttk.Button(g_model, text="➕ Entidade", command=self.add_entity).pack(side="left", padx=2, pady=4)
         self.link_btn = ttk.Button(g_model, text="🔗 Relacionar", command=self.toggle_link)
         self.link_btn.pack(side="left", padx=2, pady=4)
         ttk.Button(g_model, text="✏ Editar", command=self.edit_selected_from_inspector).pack(side="left", padx=2, pady=4)
         ttk.Button(g_model, text="⧉ Duplicar", command=self.duplicate_selected).pack(side="left", padx=2, pady=4)
         ttk.Button(g_model, text="🗑 Excluir", command=self.delete_selected).pack(side="left", padx=2, pady=4)
 
-        g_history = self._create_ribbon_group(panel, "Histórico")
-        self.undo_btn = ttk.Button(g_history, text="↶ Desfazer", command=self.undo)
-        self.undo_btn.pack(side="left", padx=2, pady=4)
-        self.redo_btn = ttk.Button(g_history, text="↷ Refazer", command=self.redo)
-        self.redo_btn.pack(side="left", padx=2, pady=4)
-        self._update_undo_redo_buttons()
-
-        g_notat = self._create_ribbon_group(panel, "Estilo de Notação")
-        self.btn_chen_mode = tk.Button(g_notat, text="📐 Chen / EER", relief="flat", bd=1, padx=8, pady=4,
-                                       command=lambda: self.set_notation("chen"))
-        self.btn_chen_mode.pack(side="left", padx=2, pady=4)
-        self.btn_table_mode = tk.Button(g_notat, text="📊 Barker", relief="flat", bd=1, padx=8, pady=4,
-                                        command=lambda: self.set_notation("barker"))
-        self.btn_table_mode.pack(side="left", padx=2, pady=4)
-        self._sync_notation_buttons()
-
-        g_schemas = self._create_ribbon_group(panel, "Esquemas")
+        g_schemas = self._create_ribbon_group(panel, "Esquemas de exemplo")
         ttk.Button(g_schemas, text="🏛 Navathe", command=self.load_navathe_example).pack(side="left", padx=2, pady=4)
         ttk.Button(g_schemas, text="🧬 EER", command=self.load_eer_example).pack(side="left", padx=2, pady=4)
-        ttk.Button(g_schemas, text="🔄 Atributos", command=self.auto_organize_attributes).pack(side="left", padx=2, pady=4)
+
+        g_layout = self._create_ribbon_group(panel, "Organização")
+        ttk.Button(g_layout, text="🔄 Reorganizar atributos", command=self.auto_organize_attributes).pack(side="left", padx=2, pady=4)
 
     def _build_tab_insert(self):
         """Todos os elementos da notação de Chen / EER (Navathe) num só lugar."""
         panel = tk.Frame(self.ribbon_container, bg="#ffffff")
         self.ribbon_panels["insert"] = panel
-        g_ent = self._create_ribbon_group(panel, "Entidades")
-        ttk.Button(g_ent, text="▢ Forte", command=lambda: self.add_entity_custom(is_weak=False)).pack(side="left", padx=2, pady=4)
-        ttk.Button(g_ent, text="⧉ Fraca", command=lambda: self.add_entity_custom(is_weak=True)).pack(side="left", padx=2, pady=4)
         g_rel = self._create_ribbon_group(panel, "Relacionamentos")
         ttk.Button(g_rel, text="◇ Binário", command=self.toggle_link).pack(side="left", padx=2, pady=4)
         ttk.Button(g_rel, text="◈ Identificador", command=lambda: self.toggle_link(identifying=True)).pack(side="left", padx=2, pady=4)
@@ -776,16 +825,6 @@ class App(tk.Tk):
     def _build_tab_view(self):
         panel = tk.Frame(self.ribbon_container, bg="#ffffff")
         self.ribbon_panels["view"] = panel
-
-        g_zoom = self._create_ribbon_group(panel, "Navegação / Zoom")
-        ttk.Button(g_zoom, text="🔍−", width=3, command=self.zoom_out).pack(side="left", padx=1, pady=4)
-        self.zoom_ribbon_lbl = ttk.Label(g_zoom, text="100%", width=5, anchor="center", font=("Segoe UI", 9, "bold"), background="#ffffff")
-        self.zoom_ribbon_lbl.pack(side="left", padx=1, pady=4)
-        ttk.Button(g_zoom, text="🔍+", width=3, command=self.zoom_in).pack(side="left", padx=1, pady=4)
-        ttk.Button(g_zoom, text="100%", width=4, command=self.zoom_reset).pack(side="left", padx=2, pady=4)
-        ttk.Button(g_zoom, text="⛶ Ajustar Tudo", command=self.zoom_fit).pack(side="left", padx=2, pady=4)
-        self.zoom_select_btn = ttk.Button(g_zoom, text="🔲 Zoom em Seleção", command=self.toggle_zoom_select_mode)
-        self.zoom_select_btn.pack(side="left", padx=2, pady=4)
 
         g_spacing = self._create_ribbon_group(panel, "Espaçamento de Atributos (Chen)")
         ttk.Label(g_spacing, text="Distância:", background="#ffffff", font=("Segoe UI", 8)).pack(side="left", padx=(0, 2))
@@ -915,34 +954,59 @@ class App(tk.Tk):
         tk.Label(p_title, text="🔷 Paleta de Formas", bg="#EEF1FA", fg="#34415F",
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=10, pady=5)
 
-        def group(title, buttons):
-            box = tk.LabelFrame(self.sidebar, text=title, bg=bg, fg="#73809B", font=("Segoe UI", 7, "bold"), padx=4, pady=2)
-            box.pack(side="top", fill="x", padx=6, pady=2)
-            for txt, cmd in buttons:
-                ttk.Button(box, text=txt, command=cmd, style="Side.TButton").pack(fill="x", pady=1)
+        def group(title, buttons, tips=None, open_=True):
+            """Grupo recolhível: clique no título para abrir/fechar."""
+            wrap = tk.Frame(self.sidebar, bg=bg)
+            wrap.pack(side="top", fill="x", padx=6, pady=(3, 0))
+            body = tk.Frame(wrap, bg=bg)
+            head = tk.Label(wrap, text=("▾ " if open_ else "▸ ") + title, bg=bg, fg="#73809B", anchor="w",
+                            font=("Segoe UI", 8, "bold"), cursor="hand2")
+            head.pack(fill="x")
+            if open_:
+                body.pack(fill="x")
 
-        group("Entidades", [("▢ Entidade Forte", lambda: self.add_entity_custom(is_weak=False)),
-                            ("⧉ Entidade Fraca", lambda: self.add_entity_custom(is_weak=True))])
-        group("Relacionamentos", [("◇ Relacionamento", self.toggle_link),
+            def toggle(_e=None):
+                if body.winfo_manager():
+                    body.pack_forget()
+                    head.config(text="▸ " + title)
+                else:
+                    body.pack(fill="x")
+                    head.config(text="▾ " + title)
+            head.bind("<Button-1>", toggle)
+            for i, (txt, cmd) in enumerate(buttons):
+                b = ttk.Button(body, text=txt, command=cmd, style="Side.TButton")
+                b.pack(fill="x", pady=1)
+                if tips and tips[i]:
+                    self._tip(b, tips[i])
+
+        group("ENTIDADES", [("▢ Entidade Forte", lambda: self.add_entity_custom(is_weak=False)),
+                            ("⧉ Entidade Fraca", lambda: self.add_entity_custom(is_weak=True))],
+              ["Cria uma entidade forte (duplo-clique no fundo também cria)",
+               "Cria uma entidade fraca (retângulo duplo, chave parcial)"])
+        group("RELACIONAMENTOS", [("◇ Relacionamento", self.toggle_link),
                                   ("◈ Identificador (duplo)", lambda: self.toggle_link(identifying=True)),
-                                  ("⬡ N-ário (3+ entidades)", self.toggle_nary)])
+                                  ("⬡ N-ário (3+ entidades)", self.toggle_nary)],
+              ["Clique em duas entidades (a mesma duas vezes = auto-relacionamento) · Ctrl+L",
+               "Relacionamento que identifica uma entidade fraca: comece pela proprietária",
+               "Clique em 3 ou mais entidades e tecle Enter"])
         group("EER", [("△ Especialização", lambda: self.new_specialization("specialization")),
                       ("▽ Generalização", lambda: self.new_specialization("generalization")),
                       ("⊍ Categoria (União)", lambda: self.new_specialization("union"))])
-        group("Atributos", [("○ Atributo na seleção", self.add_attribute_to_selected),
-                            ("📚 Domínios…", self.open_domains)])
+        group("ATRIBUTOS", [("○ Atributo na seleção", self.add_attribute_to_selected),
+                            ("📚 Domínios…", self.open_domains)],
+              ["Adiciona um atributo à entidade/relacionamento selecionado", "Listas de valores (ex.: 1=Atualizado…)"])
 
         p_insp = tk.Frame(self.sidebar, bg="#EEF1FA", height=28)
         p_insp.pack(side="top", fill="x", pady=(8, 0))
         tk.Label(p_insp, text="⚙ Inspetor de Seleção", bg="#EEF1FA", fg="#34415F",
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=10, pady=4)
         self.inspector_box = tk.Frame(self.sidebar, bg=bg, padx=8, pady=6)
-        self.inspector_box.pack(side="top", fill="x")
+        self.inspector_box.pack(side="top", fill="both", expand=True)
         self.lbl_insp_name = tk.Label(self.inspector_box, text="Nenhum selecionado", bg=bg, fg="#73809B",
-                                      font=("Segoe UI", 9, "bold"), wraplength=190, justify="left")
+                                      font=("Segoe UI", 9, "bold"), wraplength=200, justify="left")
         self.lbl_insp_name.pack(anchor="w")
         self.lbl_insp_info = tk.Label(self.inspector_box, text="Clique num elemento para inspecionar; duplo-clique para editar.",
-                                      bg=bg, fg="#98A4BB", font=("Segoe UI", 8), wraplength=190, justify="left")
+                                      bg=bg, fg="#98A4BB", font=("Segoe UI", 8), wraplength=200, justify="left")
         self.lbl_insp_info.pack(anchor="w", pady=(3, 6))
         self.btn_insp_edit = ttk.Button(self.inspector_box, text="✏ Editar (F2)", command=self.edit_selected_from_inspector, style="Side.TButton")
         self.btn_insp_edit.pack(fill="x")
@@ -957,22 +1021,24 @@ class App(tk.Tk):
 
         right_box = tk.Frame(status, bg="#302779")
         right_box.pack(side="right", padx=10)
+        self.oracle_btn = tk.Button(right_box, text="⚪ Oracle: desconectado", bg="#302779", fg="#DCD7FF",
+                                    activebackground="#4938D0", activeforeground="#ffffff", relief="flat", bd=0,
+                                    font=("Segoe UI", 8, "bold"), padx=8, cursor="hand2", command=self.open_oracle)
+        self.oracle_btn.pack(side="left", padx=(0, 12))
+        self._tip(self.oracle_btn, "Abrir a janela do Oracle (a conexão fica aberta enquanto o app estiver aberto)")
         self.status_counts = tk.Label(right_box, text="", bg="#302779", fg="#AFA6F7", font=("Segoe UI", 8))
-        self.status_counts.pack(side="left", padx=(0, 10))
-
-        def sbtn(text, cmd, pad=5):
-            b = tk.Button(right_box, text=text, bg="#4938D0", fg="#ffffff", relief="flat",
-                          font=("Segoe UI", 7, "bold"), padx=pad, pady=0, command=cmd)
-            b.pack(side="left", padx=2)
-            return b
-        sbtn("📐 Chen", lambda: self.set_notation("chen"))
-        sbtn("📊 Barker", lambda: self.set_notation("barker"))
-        tk.Label(right_box, text="·", bg="#302779", fg="#AFA6F7").pack(side="left", padx=4)
-        sbtn("−", self.zoom_out, 4)
+        self.status_counts.pack(side="left", padx=(0, 12))
+        tk.Label(right_box, text="Zoom", bg="#302779", fg="#AFA6F7", font=("Segoe UI", 8)).pack(side="left")
         self.status_zoom_lbl = tk.Label(right_box, text="100%", bg="#302779", fg="#ffffff", font=("Segoe UI", 8, "bold"), width=5)
         self.status_zoom_lbl.pack(side="left")
-        sbtn("+", self.zoom_in, 4)
-        sbtn("⛶", self.zoom_fit, 4)
+
+    def _refresh_oracle_status(self):
+        if not hasattr(self, "oracle_btn"):
+            return
+        if self.oracle.connected:
+            self.oracle_btn.config(text=f"🟢 {self.oracle.label()}", fg="#BBF7D0")
+        else:
+            self.oracle_btn.config(text="⚪ Oracle: desconectado", fg="#DCD7FF")
 
     # ---------------- Alternância e Layout ----------------
     def set_notation(self, mode, mark_dirty=True):
@@ -1267,8 +1333,8 @@ class App(tk.Tk):
 
     def _update_zoom_label(self):
         pct = f"{int(round(self.zoom * 100))}%"
-        if hasattr(self, 'zoom_ribbon_lbl'):
-            self.zoom_ribbon_lbl.config(text=pct)
+        if hasattr(self, 'zoom_var'):
+            self.zoom_var.set(pct)
         if hasattr(self, 'status_zoom_lbl'):
             self.status_zoom_lbl.config(text=pct)
 
@@ -3319,11 +3385,311 @@ DOMÍNIOS
         messagebox.showinfo("Gravar DDL", "Arquivo(s) gravado(s):\n\n" + "\n".join(paths.values()))
 
     def open_oracle(self):
-        """Conecta no Oracle, compara o modelo com o dicionário de dados e cria as tabelas em um schema."""
+        """Janela do Oracle. A conexão pertence ao app: fechar a janela não desconecta."""
+        dlg = self._oracle_dlg
+        if dlg is not None:
+            try:
+                if dlg.winfo_exists():
+                    dlg.deiconify()
+                    dlg.lift()
+                    dlg.focus_force()
+                    return dlg
+            except tk.TclError:
+                pass
+
         def statements(kind):
             if kind == "dimensional" and not any(e.kimball_role in ("dimension", "fact") for e in self.project.entities):
                 raise ValueError("Nenhuma entidade marcada como Dimensão ou Fato.")
             if kind == "transacional" and not self._confirm_validation():
                 raise ValueError("Geração cancelada: corrija os erros do modelo.")
             return [self._ddl_body(kind, "oracle")]
-        OracleDialog(self, statements)
+        self._oracle_dlg = OracleDialog(self, statements)
+        return self._oracle_dlg
+
+    def disconnect_oracle(self):
+        if self.oracle.connected and messagebox.askyesno("Desconectar", "Encerrar a conexão com o Oracle?"):
+            self.oracle.close()
+            self._refresh_oracle_status()
+            dlg = self._oracle_dlg
+            if dlg is not None:
+                try:
+                    if dlg.winfo_exists():
+                        dlg._refresh_header()
+                except tk.TclError:
+                    pass
+
+    # ---------------- Dicas, barra de navegação e menu ----------------
+    def _tip(self, widget, text):
+        Tooltip(widget, text)
+        return widget
+
+    def _build_quick_toolbar(self):
+        """Barra horizontal fixa (abaixo da faixa de opções): histórico, zoom/navegação, notação, exibição e busca."""
+        bar = tk.Frame(self, bg="#FFFFFF", height=40, highlightbackground="#DCE3F1", highlightthickness=1)
+        bar.pack(side="top", fill="x")
+        bar.pack_propagate(False)
+        self.quick_bar = bar
+
+        def sep():
+            tk.Frame(bar, bg="#DCE3F1", width=1).pack(side="left", fill="y", pady=8, padx=6)
+
+        def btn(text, cmd, tip, width=None):
+            b = ttk.Button(bar, text=text, command=cmd, style="Tool.TButton", **({"width": width} if width else {}))
+            b.pack(side="left", padx=1, pady=5)
+            self._tip(b, tip)
+            return b
+
+        # histórico
+        self.undo_btn = btn("↶", self.undo, "Desfazer · Ctrl+Z", 3)
+        self.redo_btn = btn("↷", self.redo, "Refazer · Ctrl+Y", 3)
+        self._update_undo_redo_buttons()
+        sep()
+        # navegação / zoom
+        btn("🔍−", self.zoom_out, "Diminuir zoom · Ctrl+−", 4)
+        self.zoom_var = tk.StringVar(value="100%")
+        zc = ttk.Combobox(bar, textvariable=self.zoom_var, width=6, values=["25%", "50%", "75%", "100%", "125%", "150%", "200%", "300%"])
+        zc.pack(side="left", padx=1, pady=7)
+        zc.bind("<<ComboboxSelected>>", self._zoom_from_combo)
+        zc.bind("<Return>", self._zoom_from_combo)
+        self._tip(zc, "Escolha ou digite o zoom (25% a 300%)")
+        btn("🔍+", self.zoom_in, "Aumentar zoom · Ctrl++", 4)
+        btn("100%", self.zoom_reset, "Zoom 100% · Ctrl+1", 5)
+        btn("⛶ Ajustar", self.zoom_fit, "Ajustar o modelo inteiro à tela · Ctrl+0")
+        self.zoom_select_btn = btn("🔲 Área", self.toggle_zoom_select_mode,
+                                   "Arraste uma área do diagrama para dar zoom nela")
+        btn("🎯", self.center_selection, "Centralizar o elemento selecionado", 3)
+        sep()
+        # notação
+        self.btn_chen_mode = tk.Button(bar, text="📐 Chen / EER", relief="flat", bd=1, padx=8, pady=3,
+                                       command=lambda: self.set_notation("chen"), cursor="hand2")
+        self.btn_chen_mode.pack(side="left", padx=1, pady=6)
+        self.btn_table_mode = tk.Button(bar, text="📊 Barker", relief="flat", bd=1, padx=8, pady=3,
+                                        command=lambda: self.set_notation("barker"), cursor="hand2")
+        self.btn_table_mode.pack(side="left", padx=1, pady=6)
+        self._tip(self.btn_chen_mode, "Notação de Chen / EER (Navathe)")
+        self._tip(self.btn_table_mode, "Notação de Barker (visão lógica)")
+        self._sync_notation_buttons()
+        sep()
+        # exibição
+        for text, var, cmd, tip in (("Grade", self.grid_var, self.toggle_grid, "Mostrar grade · Ctrl+G"),
+                                    ("Encaixar", self.snap_var, self.toggle_snap, "Alinhar elementos à grade ao arrastar"),
+                                    ("Legenda", self.legend_var, self.toggle_legend, "Mostrar a legenda da notação")):
+            cb = ttk.Checkbutton(bar, text=text, variable=var, command=cmd, style="Tool.Toolbutton")
+            cb.pack(side="left", padx=1, pady=5)
+            self._tip(cb, tip)
+        # busca (à direita)
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=18)
+        self.search_entry.pack(side="right", padx=(2, 10), pady=7)
+        self.search_entry.bind("<Return>", lambda _e: self.find_element())
+        self.search_entry.bind("<Escape>", lambda _e: (self.search_var.set(""), self.canvas.focus_set()))
+        tk.Label(bar, text="🔎", bg="#FFFFFF", fg="#73809B", font=("Segoe UI", 9)).pack(side="right")
+        self._tip(self.search_entry, "Busca entidade, atributo ou relacionamento · Enter = próximo resultado · Ctrl+F")
+
+    def _zoom_from_combo(self, _e=None):
+        txt = self.zoom_var.get().replace("%", "").strip()
+        try:
+            self.set_zoom(float(txt.replace(",", ".")) / 100.0)
+        except ValueError:
+            self._update_zoom_label()
+        self.canvas.focus_set()
+
+    def focus_search(self):
+        self.search_entry.focus_set()
+        self.search_entry.select_range(0, "end")
+
+    def _center_on(self, mx, my):
+        cw, ch = self.canvas.winfo_width() or 1200, self.canvas.winfo_height() or 800
+        self.pan_x = (cw / 2) / self.zoom - mx
+        self.pan_y = (ch / 2) / self.zoom - my
+        self.render()
+
+    def _selected_center(self):
+        sel = self.selected_item
+        if not sel:
+            return None
+        if sel[0] in ("entity", "attr"):
+            e = self.project.find_entity(sel[1])
+            if e:
+                x, y, w, h = self._ent_box(e)
+                return x + w / 2, y + h / 2
+        elif sel[0] in ("rel", "rel_attr"):
+            r = self.project.find_rel(sel[1])
+            if r:
+                return self._rel_pos(r)
+        elif sel[0] == "spec":
+            sp = self.project.find_spec(sel[1])
+            if sp:
+                return self._spec_pos(sp)
+        return None
+
+    def center_selection(self):
+        c = self._selected_center()
+        if c:
+            self._center_on(*c)
+        else:
+            self.status_msg.config(text="Selecione um elemento para centralizar.")
+
+    def find_element(self):
+        """Busca entidades, atributos e relacionamentos; Enter repetido percorre os resultados."""
+        q = self.search_var.get().strip().lower()
+        if not q:
+            return
+        hits = []
+        for e in self.project.entities:
+            if q in e.name.lower():
+                hits.append((f"entidade {e.name}", ("entity", e.id)))
+
+        def walk(attrs):
+            for a in attrs:
+                yield a
+                yield from walk(a.sub_attrs)
+        for e in self.project.entities:
+            for a in walk(e.attrs):
+                if q in a.name.lower():
+                    hits.append((f"atributo {e.name}.{a.name}", ("attr", e.id, a.id)))
+        for r in self.project.rels:
+            if q in r.name.lower():
+                hits.append((f"relacionamento {r.name}", ("rel", r.id)))
+        if not hits:
+            self.status_msg.config(text=f"Nada encontrado para '{q}'.")
+            return
+        self._search_idx = (self._search_idx + 1) % len(hits) if self._search_key == q else 0
+        self._search_key = q
+        label, sel = hits[self._search_idx]
+        self.selected_item = sel
+        if sel[0] == "entity":
+            self._update_inspector("entity", self.project.find_entity(sel[1]))
+        elif sel[0] == "rel":
+            self._update_inspector("rel", self.project.find_rel(sel[1]))
+        else:
+            e = self.project.find_entity(sel[1])
+            attr = next((a for a in walk(e.attrs) if a.id == sel[2]), None)
+            self._update_inspector("attr", attr, e)
+        self.status_msg.config(text=f"Encontrado {self._search_idx + 1} de {len(hits)}: {label}  (Enter = próximo)")
+        c = self._selected_center()
+        if c:
+            self._center_on(*c)
+        else:
+            self.render()
+
+    # ---------------- Salvar todos ----------------
+    def save_all(self):
+        current = self.active_document
+        saved = failed = skipped = 0
+        for d in list(self.documents):
+            if d["path"]:
+                if not d["dirty"]:
+                    continue
+                try:
+                    self._write_json_atomically(d["path"], lambda t, doc=d: doc["project"].save(t))
+                    self._write_document_snapshot(d)
+                    d["dirty"] = False
+                    saved += 1
+                except OSError as ex:
+                    failed += 1
+                    messagebox.showerror("Salvar todos", f"Não foi possível salvar '{d['name']}':\n{ex}")
+            else:
+                self._activate_document(d)
+                if self.save_project_as():
+                    saved += 1
+                else:
+                    skipped += 1
+        if current in self.documents:
+            self._activate_document(current)
+        self._refresh_document_tabs()
+        self._persist_session()
+        self.status_msg.config(text=f"Salvar todos: {saved} salvo(s)" + (f", {skipped} sem nome ignorado(s)" if skipped else "")
+                                     + (f", {failed} com erro" if failed else "") + ".")
+
+    # ---------------- Menu suspenso ----------------
+    def _build_menubar(self):
+        mb = tk.Menu(self, tearoff=0)
+        self.ribbon_var = tk.BooleanVar(value=True)
+
+        arq = tk.Menu(mb, tearoff=0)
+        arq.add_command(label="Novo projeto", accelerator="Ctrl+N", command=self.new_project)
+        arq.add_command(label="Abrir…", accelerator="Ctrl+O", command=self.load_project)
+        ex = tk.Menu(arq, tearoff=0)
+        ex.add_command(label="Empresa (Navathe cap. 3)", command=self.load_navathe_example)
+        ex.add_command(label="EER (especialização, categoria, domínio)", command=self.load_eer_example)
+        arq.add_cascade(label="Criar a partir de exemplo", menu=ex)
+        arq.add_separator()
+        arq.add_command(label="Salvar", accelerator="Ctrl+S", command=self.save_project)
+        arq.add_command(label="Salvar como…", accelerator="Ctrl+Shift+S", command=self.save_project_as)
+        arq.add_command(label="Salvar todos", command=self.save_all)
+        arq.add_separator()
+        exp = tk.Menu(arq, tearoff=0)
+        exp.add_command(label="Relatório HTML…", command=self.export_html)
+        exp.add_command(label="Documento PDF…", command=self.export_pdf)
+        arq.add_cascade(label="Exportar", menu=exp)
+        ddl = tk.Menu(arq, tearoff=0)
+        ddl.add_command(label="DDL transacional…", command=lambda: self.save_ddl("transacional"))
+        ddl.add_command(label="DDL dimensional…", command=lambda: self.save_ddl("dimensional"))
+        ddl.add_command(label="Ambos…", command=lambda: self.save_ddl("ambos"))
+        arq.add_cascade(label="Gravar DDL (.sql)", menu=ddl)
+        arq.add_separator()
+        arq.add_command(label="Sair", command=self.close_application)
+        mb.add_cascade(label="Arquivo", menu=arq)
+
+        ed = tk.Menu(mb, tearoff=0)
+        ed.add_command(label="Desfazer", accelerator="Ctrl+Z", command=self.undo)
+        ed.add_command(label="Refazer", accelerator="Ctrl+Y", command=self.redo)
+        ed.add_separator()
+        ed.add_command(label="Editar seleção", accelerator="F2", command=self.edit_selected_from_inspector)
+        ed.add_command(label="Duplicar", accelerator="Ctrl+D", command=self.duplicate_selected)
+        ed.add_command(label="Excluir", accelerator="Del", command=self.delete_selected)
+        ed.add_separator()
+        ed.add_command(label="Buscar elemento", accelerator="Ctrl+F", command=self.focus_search)
+        mb.add_cascade(label="Editar", menu=ed)
+
+        ex_ = tk.Menu(mb, tearoff=0)
+        ex_.add_command(label="Aumentar zoom", accelerator="Ctrl++", command=self.zoom_in)
+        ex_.add_command(label="Diminuir zoom", accelerator="Ctrl+−", command=self.zoom_out)
+        ex_.add_command(label="Zoom 100%", accelerator="Ctrl+1", command=self.zoom_reset)
+        ex_.add_command(label="Ajustar modelo à tela", accelerator="Ctrl+0", command=self.zoom_fit)
+        ex_.add_command(label="Zoom em uma área", command=self.toggle_zoom_select_mode)
+        ex_.add_command(label="Centralizar seleção", command=self.center_selection)
+        ex_.add_separator()
+        nt = tk.Menu(ex_, tearoff=0)
+        nt.add_command(label="Chen / EER (Navathe)", command=lambda: self.set_notation("chen"))
+        nt.add_command(label="Barker", command=lambda: self.set_notation("barker"))
+        ex_.add_cascade(label="Notação", menu=nt)
+        ex_.add_separator()
+        ex_.add_checkbutton(label="Grade", accelerator="Ctrl+G", variable=self.grid_var, command=self.toggle_grid)
+        ex_.add_checkbutton(label="Encaixar na grade", variable=self.snap_var, command=self.toggle_snap)
+        ex_.add_checkbutton(label="Legenda", variable=self.legend_var, command=self.toggle_legend)
+        ex_.add_checkbutton(label="Paleta lateral", variable=self.sidebar_var, command=self.toggle_sidebar)
+        ex_.add_checkbutton(label="Faixa de opções", accelerator="Ctrl+F1", variable=self.ribbon_var, command=self.toggle_ribbon)
+        mb.add_cascade(label="Exibir", menu=ex_)
+
+        ins = tk.Menu(mb, tearoff=0)
+        ins.add_command(label="Entidade forte", command=lambda: self.add_entity_custom(is_weak=False))
+        ins.add_command(label="Entidade fraca", command=lambda: self.add_entity_custom(is_weak=True))
+        ins.add_separator()
+        ins.add_command(label="Relacionamento", accelerator="Ctrl+L", command=self.toggle_link)
+        ins.add_command(label="Relacionamento identificador", command=lambda: self.toggle_link(identifying=True))
+        ins.add_command(label="Relacionamento n-ário", command=self.toggle_nary)
+        ins.add_separator()
+        ins.add_command(label="Especialização", command=lambda: self.new_specialization("specialization"))
+        ins.add_command(label="Generalização", command=lambda: self.new_specialization("generalization"))
+        ins.add_command(label="Categoria (união)", command=lambda: self.new_specialization("union"))
+        ins.add_separator()
+        ins.add_command(label="Atributo na seleção", command=self.add_attribute_to_selected)
+        ins.add_command(label="Domínios…", command=self.open_domains)
+        mb.add_cascade(label="Inserir", menu=ins)
+
+        db = tk.Menu(mb, tearoff=0)
+        db.add_command(label="Validar modelo", accelerator="F5", command=self.validate_model)
+        db.add_command(label="Ver DDL transacional", accelerator="F9", command=self.show_ddl)
+        db.add_command(label="Ver DDL dimensional", command=self.show_kimball_ddl)
+        db.add_separator()
+        db.add_command(label="Oracle: conectar / dicionário / criar tabelas…", command=self.open_oracle)
+        db.add_command(label="Oracle: desconectar", command=self.disconnect_oracle)
+        mb.add_cascade(label="Banco de dados", menu=db)
+
+        aj = tk.Menu(mb, tearoff=0)
+        aj.add_command(label="Atalhos e dicas", accelerator="F1", command=self.show_help)
+        mb.add_cascade(label="Ajuda", menu=aj)
+        self.config(menu=mb)
+        self.bind_all("<Control-F1>", lambda _e: self.toggle_ribbon())

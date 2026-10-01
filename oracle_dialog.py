@@ -1,4 +1,5 @@
-"""Janela 'Oracle': conectar, ler o dicionário de dados, comparar com o modelo e criar as tabelas."""
+"""Janela 'Oracle': conexão persistente, explorador do dicionário de dados, verificação e criação de tabelas."""
+import csv
 import datetime
 import os
 import queue
@@ -10,27 +11,56 @@ import oracle_tools as O
 
 STATE_LABEL = {"NOVA": "Nova (não existe)", "NO_DESTINO": "Já existe no destino",
                "EM_OUTRO_SCHEMA": "Existe em outro schema"}
+STATE_SHORT = {"NOVA": "Novas", "NO_DESTINO": "No destino", "EM_OUTRO_SCHEMA": "Em outro schema"}
 ACTION_LABEL = {"criar": "Criar no destino", "acessar": "Conceder acesso + sinônimo", "ignorar": "Ignorar"}
+CTYPE = {"P": "PK", "U": "UNIQUE", "R": "FK", "C": "CHECK"}
+FILTERS = ["Todas", "Novas", "Já existem no destino", "Existem em outro schema", "Com diferenças"]
+
+
+def _fmt_num(n):
+    return "—" if n is None else f"{int(n):,}".replace(",", ".")
+
+
+def _fmt_date(d):
+    try:
+        return d.strftime("%d/%m/%Y %H:%M") if d else "—"
+    except Exception:
+        return str(d) if d else "—"
+
+
+def make_tree(parent, cols, height=8, anchors=None):
+    """Treeview com barras de rolagem. cols = [(id, título, largura)]."""
+    box = ttk.Frame(parent)
+    tree = ttk.Treeview(box, columns=[c[0] for c in cols], show="headings", height=height)
+    for cid, title, width in cols:
+        tree.heading(cid, text=title)
+        tree.column(cid, width=width, anchor=(anchors or {}).get(cid, "w"), stretch=True)
+    ys = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+    xs = ttk.Scrollbar(box, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+    ys.pack(side="right", fill="y")
+    xs.pack(side="bottom", fill="x")
+    tree.pack(side="left", fill="both", expand=True)
+    return box, tree
 
 
 class OracleDialog(tk.Toplevel):
     def __init__(self, app, get_statements, default_kind="transacional"):
         super().__init__(app)
         self.title("Oracle — dicionário de dados e criação de tabelas")
-        self.geometry("1080x740")
-        self.minsize(900, 600)
+        self.geometry("1220x800")
+        self.minsize(1000, 640)
         self.transient(app)
         self.app = app
-        self.get_statements = get_statements          # callable(kind) -> lista de comandos SQL (dialeto Oracle)
-        self.conn = None
-        self.views = "all"
-        self.privs = set()
-        self.info = {}
+        self.sess = app.oracle                          # conexão que sobrevive ao fechamento desta janela
+        self.get_statements = get_statements            # callable(kind) -> lista de comandos SQL (dialeto Oracle)
         self.statuses, self.expected, self.meta, self.statements = [], {}, {}, []
+        self.grants, self.synonyms = {}, {}
         self.owner_idx = {}
         self.steps, self.notes = [], []
         self.busy = False
-        cfg = O.load_profile()
+        self.ex_tables, self.ex_current = [], None
+        cfg = self.sess.cfg if self.sess.cfg.user else O.load_profile()
 
         self.user_var = tk.StringVar(value=cfg.user)
         self.pwd_var = tk.StringVar()
@@ -44,39 +74,47 @@ class OracleDialog(tk.Toplevel):
         self.sync_var = tk.BooleanVar(value=False)
         self.stop_var = tk.BooleanVar(value=True)
 
+        st = ttk.Style(self)
+        st.configure("Treeview", rowheight=22, font=("Segoe UI", 9))
+        st.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        st.configure("Card.TLabel", font=("Segoe UI", 9, "bold"), padding=(10, 6), background="#FFFFFF")
+
+        self._build_header()
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        self.nb.pack(fill="both", expand=True, padx=8, pady=(2, 0))
+        self.action_buttons = []
         self._build_conn_tab()
+        self._build_explorer_tab()
         self._build_verify_tab()
         self._build_plan_tab()
-        self.status = ttk.Label(self, text="Desconectado", anchor="w", padding=(10, 4))
+        self.status = ttk.Label(self, text="", anchor="w", padding=(10, 4))
         self.status.pack(fill="x")
         self.bind("<Escape>", lambda e: self.destroy())
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._refresh_header()
+        if self.sess.connected:
+            self._after_connect(initial=True)
 
-    # ------------------------------------------------------------ utilidades
+    # ------------------------------------------------------------ ciclo de vida
     def destroy(self):
+        """Fecha só a janela: a conexão continua aberta na sessão do aplicativo."""
         self.pwd_var.set("")
         self.newpwd_var.set("")
-        if self.conn is not None:
-            try:
-                self.conn.close()
-            except Exception:
-                pass
-            self.conn = None
+        if getattr(self.app, "_oracle_dlg", None) is self:
+            self.app._oracle_dlg = None
         super().destroy()
 
     def _set_busy(self, busy, msg=""):
         self.busy = busy
         self.config(cursor="watch" if busy else "")
-        for b in getattr(self, "action_buttons", []):
+        for b in self.action_buttons:
             b.state(["disabled"] if busy else ["!disabled"])
         if msg:
             self.status.config(text=msg)
 
-    def _bg(self, fn, done, msg):
-        """Executa `fn` numa thread (a interface não trava) e chama `done(resultado)` na thread da UI."""
+    def _bg(self, fn, done, msg, on_error=None):
+        """Executa `fn` numa thread (interface não trava) e chama `done(resultado)` na thread da UI."""
         if self.busy:
+            self.status.config(text="Aguarde: há uma operação em andamento…")
             return
         self._set_busy(True, msg)
         q = queue.Queue()
@@ -84,9 +122,8 @@ class OracleDialog(tk.Toplevel):
         def work():
             try:
                 q.put(("ok", fn()))
-            except Exception as ex:      # noqa: BLE001 — repassa qualquer erro para a UI
+            except Exception as ex:      # noqa: BLE001
                 q.put(("err", ex))
-
         threading.Thread(target=work, daemon=True).start()
 
         def poll():
@@ -100,7 +137,10 @@ class OracleDialog(tk.Toplevel):
             self._set_busy(False)
             if kind == "err":
                 self.status.config(text=f"Erro: {val}")
-                messagebox.showerror("Oracle", str(val), parent=self)
+                if on_error:
+                    on_error(val)
+                else:
+                    messagebox.showerror("Oracle", str(val), parent=self)
             else:
                 done(val)
         self.after(80, poll)
@@ -110,7 +150,48 @@ class OracleDialog(tk.Toplevel):
                             tns_dir=self.tns_var.get().strip())
 
     def _connected_user(self):
-        return (self.info.get("user") or self.user_var.get()).upper()
+        return (self.sess.info.get("user") or self.user_var.get()).upper()
+
+    def _need_conn(self):
+        if not self.sess.check():
+            self._refresh_header()
+            messagebox.showinfo("Oracle", "Sem conexão ativa (ela pode ter caído). Conecte-se na aba 1; "
+                                          "a senha é pedida de novo por segurança.", parent=self)
+            self.nb.select(0)
+            return False
+        return True
+
+    # ------------------------------------------------------------ faixa de status (sempre visível)
+    def _build_header(self):
+        bar = tk.Frame(self, bg="#EEF1FA")
+        bar.pack(fill="x", padx=8, pady=(8, 4))
+        self.hdr_dot = tk.Label(bar, text="●", bg="#EEF1FA", fg="#9CA3AF", font=("Segoe UI", 12))
+        self.hdr_dot.pack(side="left", padx=(10, 4), pady=6)
+        self.hdr_lbl = tk.Label(bar, text="", bg="#EEF1FA", fg="#25304A", font=("Segoe UI", 9, "bold"), anchor="w")
+        self.hdr_lbl.pack(side="left")
+        self.hdr_sub = tk.Label(bar, text="", bg="#EEF1FA", fg="#73809B", font=("Segoe UI", 8))
+        self.hdr_sub.pack(side="left", padx=12)
+        self.btn_disc = ttk.Button(bar, text="⏏ Desconectar", command=self.disconnect)
+        self.btn_disc.pack(side="right", padx=8, pady=4)
+
+    def _refresh_header(self):
+        s = self.sess
+        if s.connected:
+            scope = "DBA_*" if s.views == "dba" else "ALL_*"
+            self.hdr_dot.config(fg="#16A34A")
+            self.hdr_lbl.config(text=f"Conectado como {s.info.get('user', '')}")
+            self.hdr_sub.config(text=f"{s.cfg.dsn}  ·  container {s.info.get('container') or '—'}  ·  "
+                                     f"{len(s.schemas)} schemas  ·  dicionário {scope}")
+            self.btn_disc.state(["!disabled"])
+        else:
+            self.hdr_dot.config(fg="#9CA3AF")
+            self.hdr_lbl.config(text="Desconectado")
+            self.hdr_sub.config(text="Informe usuário, senha e DSN na aba 1")
+            self.btn_disc.state(["disabled"])
+        try:
+            self.app._refresh_oracle_status()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ aba 1: conexão
     def _build_conn_tab(self):
@@ -122,19 +203,21 @@ class OracleDialog(tk.Toplevel):
                 ("DSN (host:porta/serviço):", self.dsn_var, None), ("Pasta TNS/Wallet (opcional):", self.tns_var, None)]
         for i, (lbl, var, show) in enumerate(rows):
             ttk.Label(box, text=lbl).grid(row=i, column=0, sticky="w", pady=3)
-            ttk.Entry(box, textvariable=var, width=46, show=show or "").grid(row=i, column=1, sticky="w", padx=8)
-        ttk.Label(box, text="Ex.: localhost:1521/FREEPDB1  ·  a senha nunca é gravada em disco", foreground="#73809B").grid(
+            e = ttk.Entry(box, textvariable=var, width=46, show=show or "")
+            e.grid(row=i, column=1, sticky="w", padx=8)
+            if lbl == "Senha:":
+                e.bind("<Return>", lambda _e: self.connect())
+        ttk.Label(box, text="Ex.: localhost:1521/FREEPDB1  ·  a senha nunca é gravada em disco; a conexão fica "
+                            "aberta até você desconectar ou fechar o aplicativo", foreground="#73809B").grid(
             row=4, column=1, sticky="w", padx=8)
         bar = ttk.Frame(box)
         bar.grid(row=5, column=1, sticky="w", padx=8, pady=(8, 0))
         self.btn_connect = ttk.Button(bar, text="🔌 Conectar", command=self.connect)
         self.btn_connect.pack(side="left")
         ttk.Button(bar, text="💾 Salvar perfil (sem senha)", command=self.save_profile).pack(side="left", padx=6)
-        self.conn_info = ttk.Label(f, text="", foreground="#0f766e", justify="left")
-        self.conn_info.pack(anchor="w", pady=(8, 4))
 
         dest = ttk.LabelFrame(f, text="O que criar e onde", padding=10)
-        dest.pack(fill="x", pady=6)
+        dest.pack(fill="x", pady=10)
         ttk.Label(dest, text="Modelo:").grid(row=0, column=0, sticky="w")
         kb = ttk.Frame(dest)
         kb.grid(row=0, column=1, sticky="w", padx=8)
@@ -157,8 +240,8 @@ class OracleDialog(tk.Toplevel):
         self.ts_cb.pack(side="left", padx=6)
         self._toggle_mkschema()
         ttk.Label(f, text="Nada é apagado nem sobrescrito: tabelas que já existem são apenas comparadas.",
-                  foreground="#73809B").pack(anchor="w", pady=(10, 0))
-        self.action_buttons = [self.btn_connect]
+                  foreground="#73809B").pack(anchor="w", pady=(4, 0))
+        self.action_buttons.append(self.btn_connect)
 
     def _toggle_mkschema(self):
         st = "normal" if self.mkschema_var.get() else "disabled"
@@ -171,79 +254,288 @@ class OracleDialog(tk.Toplevel):
 
     def connect(self):
         cfg, pwd = self._cfg(), self.pwd_var.get()
+        sess = self.sess
+
+        def done(_):
+            self.pwd_var.set("")
+            self._after_connect()
+        self._bg(lambda: sess.open(cfg, pwd), done, "Conectando…")
+
+    def disconnect(self):
+        if self.sess.connected and messagebox.askyesno("Desconectar", "Encerrar a conexão com o Oracle?", parent=self):
+            self.sess.close()
+            self.statuses, self.steps = [], []
+            self._refresh_header()
+            self.status.config(text="Desconectado.")
+
+    def _after_connect(self, initial=False):
+        s = self.sess
+        self.target_cb.config(values=s.schemas)
+        if s.tablespaces:
+            self.ts_cb.config(values=s.tablespaces)
+        if not self.target_var.get():
+            self.target_var.set(s.info.get("current_schema", ""))
+        self.ex_schema_cb.config(values=s.schemas)
+        if not self.ex_schema.get():
+            self.ex_schema.set(self.target_var.get() or (s.schemas[0] if s.schemas else ""))
+        self._refresh_header()
+        self.status.config(text="Conexão ativa. Explore o dicionário (aba 2) ou verifique o modelo (aba 3).")
+        if self.ex_schema.get():
+            self.ex_load_tables()
+
+    # ------------------------------------------------------------ aba 2: explorador do dicionário
+    def _build_explorer_tab(self):
+        f = ttk.Frame(self.nb, padding=8)
+        self.nb.add(f, text="2. Dicionário de dados")
+        paned = ttk.PanedWindow(f, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+        left, right = ttk.Frame(paned, padding=(0, 0, 6, 0)), ttk.Frame(paned)
+        paned.add(left, weight=1)
+        paned.add(right, weight=3)
+
+        top = ttk.Frame(left)
+        top.pack(fill="x")
+        ttk.Label(top, text="Schema:").pack(side="left")
+        self.ex_schema = tk.StringVar()
+        self.ex_schema_cb = ttk.Combobox(top, textvariable=self.ex_schema, width=24, state="readonly")
+        self.ex_schema_cb.pack(side="left", padx=6)
+        self.ex_schema_cb.bind("<<ComboboxSelected>>", lambda _e: self.ex_load_tables())
+        ttk.Button(top, text="⟳", width=3, command=self.ex_load_tables).pack(side="left")
+        self.ex_counts = ttk.Label(left, text="", foreground="#73809B", wraplength=300, justify="left")
+        self.ex_counts.pack(anchor="w", pady=(4, 2))
+        srow = ttk.Frame(left)
+        srow.pack(fill="x", pady=2)
+        ttk.Label(srow, text="🔎").pack(side="left")
+        self.ex_search = tk.StringVar()
+        ttk.Entry(srow, textvariable=self.ex_search).pack(side="left", fill="x", expand=True, padx=4)
+        self.ex_search.trace_add("write", lambda *_: self._ex_fill())
+        box, self.ex_tree = make_tree(left, [("name", "Tabela", 190), ("rows", "Linhas", 70), ("comment", "Comentário", 160)],
+                                      height=18, anchors={"rows": "e"})
+        box.pack(fill="both", expand=True, pady=(4, 0))
+        self.ex_tree.bind("<<TreeviewSelect>>", self._ex_select)
+
+        self.ex_head = ttk.Label(right, text="Selecione uma tabela à esquerda.", font=("Segoe UI", 10, "bold"),
+                                 wraplength=760, justify="left")
+        self.ex_head.pack(anchor="w")
+        self.ex_sub = ttk.Label(right, text="", foreground="#73809B", wraplength=760, justify="left")
+        self.ex_sub.pack(anchor="w", pady=(2, 6))
+        self.ex_nb = ttk.Notebook(right)
+        self.ex_nb.pack(fill="both", expand=True)
+        tabs = {
+            "cols": ("Colunas", [("n", "#", 36), ("name", "Coluna", 180), ("type", "Tipo", 130), ("null", "Nulo?", 60),
+                                 ("key", "Chave", 70), ("comment", "Comentário", 360)]),
+            "cons": ("Constraints", [("type", "Tipo", 80), ("name", "Nome", 220), ("cols", "Colunas", 200), ("ref", "Referencia", 170),
+                                     ("rule", "ON DELETE", 90), ("status", "Status", 80), ("cond", "Condição", 240)]),
+            "idx": ("Índices", [("name", "Nome", 240), ("type", "Tipo", 120), ("uniq", "Único", 70), ("cols", "Colunas", 300),
+                                ("status", "Status", 90)]),
+            "priv": ("Privilégios", [("grantee", "Concedido a", 200), ("priv", "Privilégio", 160), ("grant", "Repassável", 90)]),
+            "refs": ("Referenciada por", [("table", "Tabela filha", 260), ("cons", "Constraint", 260), ("rule", "ON DELETE", 120)]),
+        }
+        self.ex_trees = {}
+        for key, (title, cols) in tabs.items():
+            fr = ttk.Frame(self.ex_nb, padding=4)
+            self.ex_nb.add(fr, text=title)
+            box, tree = make_tree(fr, cols, height=12)
+            box.pack(fill="both", expand=True)
+            self.ex_trees[key] = tree
+        self.ex_trees["cols"].tag_configure("pk", foreground="#1d4ed8")
+        self.ex_trees["cols"].tag_configure("fk", foreground="#7c3aed")
+        # DDL
+        fr = ttk.Frame(self.ex_nb, padding=4)
+        self.ex_nb.add(fr, text="DDL")
+        bar = ttk.Frame(fr)
+        bar.pack(fill="x")
+        self.btn_ddl = ttk.Button(bar, text="Carregar DDL (DBMS_METADATA)", command=self.ex_load_ddl)
+        self.btn_ddl.pack(side="left")
+        ttk.Button(bar, text="📋 Copiar", command=lambda: self._copy_text(self.ex_ddl_txt)).pack(side="left", padx=6)
+        self.ex_ddl_txt = tk.Text(fr, font=("Consolas", 9), wrap="none", height=12, bg="#F8F9FE")
+        self.ex_ddl_txt.pack(fill="both", expand=True, pady=4)
+        # Amostra de dados
+        fr = ttk.Frame(self.ex_nb, padding=4)
+        self.ex_nb.add(fr, text="Amostra de dados")
+        bar = ttk.Frame(fr)
+        bar.pack(fill="x")
+        self.sample_n = tk.StringVar(value="50")
+        ttk.Label(bar, text="Linhas:").pack(side="left")
+        ttk.Combobox(bar, textvariable=self.sample_n, values=["20", "50", "100", "200"], width=6, state="readonly").pack(side="left", padx=4)
+        self.btn_sample = ttk.Button(bar, text="Carregar amostra (somente leitura)", command=self.ex_load_sample)
+        self.btn_sample.pack(side="left", padx=6)
+        self.sample_holder = ttk.Frame(fr)
+        self.sample_holder.pack(fill="both", expand=True, pady=4)
+        self.action_buttons += [self.btn_ddl, self.btn_sample]
+
+    def _copy_text(self, widget):
+        self.clipboard_clear()
+        self.clipboard_append(widget.get("1.0", "end").strip())
+        self.status.config(text="Copiado para a área de transferência.")
+
+    def ex_load_tables(self):
+        if not self._need_conn():
+            return
+        owner, conn, views = self.ex_schema.get(), self.sess.conn, self.sess.views
+        if not owner:
+            return
 
         def work():
-            conn = O.connect(cfg, pwd)
-            try:
-                info = O.session_info(conn)
-                return {"conn": conn, "info": info, "views": O.detect_views(conn), "privs": O.session_privileges(conn),
-                        "schemas": O.list_schemas(conn), "tablespaces": O.list_tablespaces(conn)}
-            except Exception:
-                conn.close()
-                raise
+            return O.list_tables(conn, owner, views), O.count_objects(conn, owner, views)
 
         def done(r):
-            if self.conn is not None:
-                try:
-                    self.conn.close()
-                except Exception:
-                    pass
-            self.conn, self.info, self.views, self.privs = r["conn"], r["info"], r["views"], r["privs"]
-            self.target_cb.config(values=r["schemas"])
-            if r["tablespaces"]:
-                self.ts_cb.config(values=r["tablespaces"])
-            if not self.target_var.get():
-                self.target_var.set(r["info"]["current_schema"])
-            scope = "dicionário completo (DBA_*)" if self.views == "dba" else "dicionário restrito ao que o usuário enxerga (ALL_*)"
-            self.conn_info.config(text=f"✔ Conectado como {r['info']['user']}  ·  container {r['info']['container'] or '—'}  ·  "
-                                       f"{len(r['schemas'])} schemas  ·  {scope}")
-            self.status.config(text="Conectado. Escolha o schema de destino e vá para '2. Verificação'.")
-            self.pwd_var.set("")
-        self._bg(work, done, "Conectando…")
+            self.ex_tables, counts = r
+            self.ex_counts.config(text=f"{owner}: " + (", ".join(f"{n} {t.lower()}" for t, n in counts.items()) or "sem objetos"))
+            self._ex_fill()
+            self.status.config(text=f"{len(self.ex_tables)} tabelas em {owner}.")
+        self._bg(work, done, f"Lendo tabelas de {owner}…")
 
-    # ------------------------------------------------------------ aba 2: verificação
+    def _ex_fill(self):
+        q = self.ex_search.get().strip().upper()
+        self.ex_tree.delete(*self.ex_tree.get_children())
+        for t in self.ex_tables:
+            if q and q not in t["name"] and q not in t["comment"].upper():
+                continue
+            self.ex_tree.insert("", "end", iid=t["name"], values=(t["name"], _fmt_num(t["rows"]), t["comment"]))
+
+    def _ex_select(self, _e=None):
+        sel = self.ex_tree.selection()
+        if not sel or not self._need_conn():
+            return
+        owner, table, conn, views = self.ex_schema.get(), sel[0], self.sess.conn, self.sess.views
+        self.ex_current = (owner, table)
+        self._ex_clear_extra()
+        self._bg(lambda: O.table_details(conn, owner, table, views), lambda d: self._ex_show(d),
+                 f"Lendo metadados de {owner}.{table}…")
+
+    def _ex_clear_extra(self):
+        self.ex_ddl_txt.delete("1.0", "end")
+        for w in self.sample_holder.winfo_children():
+            w.destroy()
+
+    def _ex_show(self, d):
+        if self.ex_current != (d["owner"], d["table"]):
+            return
+        sm = d["summary"]
+        flags = [x for x, on in (("particionada", sm.get("partitioned")), ("temporária", sm.get("temporary"))) if on]
+        self.ex_head.config(text=f"{d['owner']}.{d['table']}" + (f"   —   {sm['comment']}" if sm.get("comment") else ""))
+        self.ex_sub.config(text=f"{_fmt_num(sm.get('rows'))} linhas (estatística)  ·  analisada em {_fmt_date(sm.get('analyzed'))}  ·  "
+                                f"tablespace {sm.get('tablespace') or '—'}  ·  {len(d["columns"])} coluna(s)"
+                                + (f"  ·  {', '.join(flags)}" if flags else ""))
+        fk_cols = {c for con in d["constraints"] if con["type"] == "R" for c in con["columns"]}
+        t = self.ex_trees["cols"]
+        t.delete(*t.get_children())
+        for i, c in enumerate(d["columns"], 1):
+            key = ("🔑 PK " if c["name"] in d["pk"] else "") + ("🔗 FK" if c["name"] in fk_cols else "")
+            tag = ("pk",) if c["name"] in d["pk"] else (("fk",) if c["name"] in fk_cols else ())
+            t.insert("", "end", values=(i, c["name"], c["type"] + (" · identity" if c["identity"] else ""),
+                                        "sim" if c["nullable"] else "NÃO", key.strip(), c["comment"]), tags=tag)
+        t = self.ex_trees["cons"]
+        t.delete(*t.get_children())
+        for c in d["constraints"]:
+            kind = CTYPE.get(c["type"], c["type"])
+            cond = " ".join(c["condition"].split())
+            if c["type"] == "C" and cond.upper().endswith("IS NOT NULL"):
+                kind = "NOT NULL"
+            t.insert("", "end", values=(kind, c["name"], ", ".join(c["columns"]),
+                                        c["ref_table"] if c["type"] == "R" else "", c["delete_rule"], c["status"],
+                                        cond if c["type"] == "C" else ""))
+        t = self.ex_trees["idx"]
+        t.delete(*t.get_children())
+        for i in d["indexes"]:
+            t.insert("", "end", values=(i["name"], i["type"], "sim" if i["unique"] else "não", ", ".join(i["columns"]), i["status"]))
+        t = self.ex_trees["priv"]
+        t.delete(*t.get_children())
+        for p in d["privileges"]:
+            t.insert("", "end", values=(p["grantee"], p["privilege"], "sim" if p["grantable"] else "não"))
+        t = self.ex_trees["refs"]
+        t.delete(*t.get_children())
+        for c in d["children"]:
+            t.insert("", "end", values=(c["table"], c["constraint"], c["delete_rule"]))
+        titles = {"cons": len(d["constraints"]), "idx": len(d["indexes"]), "priv": len(d["privileges"]), "refs": len(d["children"])}
+        names = {"cons": "Constraints", "idx": "Índices", "priv": "Privilégios", "refs": "Referenciada por"}
+        for i, key in enumerate(["cols", "cons", "idx", "priv", "refs"]):
+            n = len(d["columns"]) if key == "cols" else titles[key]
+            self.ex_nb.tab(i, text=f"{'Colunas' if key == 'cols' else names[key]} ({n})")
+        self.status.config(text=f"Metadados de {d['owner']}.{d['table']} carregados.")
+
+    def ex_load_ddl(self):
+        if not self.ex_current or not self._need_conn():
+            return
+        owner, table, conn = self.ex_current[0], self.ex_current[1], self.sess.conn
+
+        def done(txt):
+            self.ex_ddl_txt.delete("1.0", "end")
+            self.ex_ddl_txt.insert("1.0", txt.strip())
+        self._bg(lambda: O.get_ddl(conn, owner, table), done, "Lendo o DDL…",
+                 on_error=lambda ex: (self.ex_ddl_txt.delete("1.0", "end"),
+                                      self.ex_ddl_txt.insert("1.0", f"Não foi possível obter o DDL: {ex}\n\n"
+                                                                    f"(DBMS_METADATA exige EXECUTE e acesso à tabela.)")))
+
+    def ex_load_sample(self):
+        if not self.ex_current or not self._need_conn():
+            return
+        owner, table, conn = self.ex_current[0], self.ex_current[1], self.sess.conn
+        n = int(self.sample_n.get())
+
+        def done(r):
+            cols, rows = r
+            for w in self.sample_holder.winfo_children():
+                w.destroy()
+            box, tree = make_tree(self.sample_holder, [(f"c{i}", c, 120) for i, c in enumerate(cols)], height=12)
+            box.pack(fill="both", expand=True)
+            for row in rows:
+                tree.insert("", "end", values=["" if v is None else str(v)[:200] for v in row])
+            self.status.config(text=f"{len(rows)} linhas de {owner}.{table} (limite {n}).")
+        self._bg(lambda: O.sample_rows(conn, owner, table, n), done, "Lendo amostra…")
+
+    # ------------------------------------------------------------ aba 3: verificação
     def _build_verify_tab(self):
         f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="2. Verificação")
+        self.nb.add(f, text="3. Verificação do modelo")
         bar = ttk.Frame(f)
         bar.pack(fill="x")
-        self.btn_analyze = ttk.Button(bar, text="🔎 Ler dicionário de dados e comparar", command=self.analyze)
+        self.btn_analyze = ttk.Button(bar, text="🔎 Ler dicionário e comparar", command=self.analyze)
         self.btn_analyze.pack(side="left")
-        ttk.Label(bar, text="  duplo-clique em 'Ação' (ou em 'Onde existe' quando houver vários schemas) para alterar",
-                  foreground="#73809B").pack(side="left")
-        cols = ("table", "state", "where", "diff", "action")
-        self.vtree = ttk.Treeview(f, columns=cols, show="headings", height=9)
-        for c, t, w in (("table", "Tabela do modelo", 220), ("state", "Situação", 190), ("where", "Onde existe", 120),
-                        ("diff", "Diferenças (colunas)", 300), ("action", "Ação", 220)):
-            self.vtree.heading(c, text=t)
-            self.vtree.column(c, width=w, anchor="w")
-        self.vtree.tag_configure("NOVA", background="#ECFDF5")
-        self.vtree.tag_configure("NO_DESTINO", background="#EFF6FF")
-        self.vtree.tag_configure("EM_OUTRO_SCHEMA", background="#FFF7ED")
-        self.vtree.tag_configure("CONFLITO", background="#FEE2E2")
-        self.vtree.pack(fill="x", pady=8)
+        ttk.Label(bar, text="  Filtro:").pack(side="left")
+        self.filter_var = tk.StringVar(value=FILTERS[0])
+        cb = ttk.Combobox(bar, textvariable=self.filter_var, values=FILTERS, state="readonly", width=24)
+        cb.pack(side="left", padx=4)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._fill_verify())
+        ttk.Label(bar, text="🔎").pack(side="left", padx=(8, 0))
+        self.vsearch = tk.StringVar()
+        ttk.Entry(bar, textvariable=self.vsearch, width=20).pack(side="left", padx=4)
+        self.vsearch.trace_add("write", lambda *_: self._fill_verify())
+        ttk.Button(bar, text="📄 Exportar CSV…", command=self.export_csv).pack(side="right")
+        ttk.Button(bar, text="🔎 Ver no dicionário", command=self.goto_explorer).pack(side="right", padx=6)
+
+        cards = tk.Frame(f, bg="#F4F6FC")
+        cards.pack(fill="x", pady=(8, 4))
+        self.cards = {}
+        for key, label, color in (("total", "Tabelas do modelo", "#25304A"), ("NOVA", "Novas", "#15803d"),
+                                  ("NO_DESTINO", "Já no destino", "#1d4ed8"), ("EM_OUTRO_SCHEMA", "Em outro schema", "#b45309"),
+                                  ("diff", "Com diferenças", "#b91c1c")):
+            c = tk.Frame(cards, bg="#FFFFFF", highlightbackground="#DCE3F1", highlightthickness=1)
+            c.pack(side="left", padx=(0, 8), ipadx=10, ipady=2)
+            n = tk.Label(c, text="—", bg="#FFFFFF", fg=color, font=("Segoe UI", 16, "bold"))
+            n.pack()
+            tk.Label(c, text=label, bg="#FFFFFF", fg="#73809B", font=("Segoe UI", 8)).pack()
+            self.cards[key] = n
+
+        cols = [("table", "Tabela do modelo", 230), ("state", "Situação", 190), ("where", "Onde existe", 120),
+                ("diff", "Diferenças (colunas)", 290), ("action", "Ação (duplo-clique alterna)", 210)]
+        box, self.vtree = make_tree(f, cols, height=9)
+        box.pack(fill="x", pady=6)
+        for tag, bg in (("NOVA", "#ECFDF5"), ("NO_DESTINO", "#EFF6FF"), ("EM_OUTRO_SCHEMA", "#FFF7ED"), ("CONFLITO", "#FEE2E2")):
+            self.vtree.tag_configure(tag, background=bg)
         self.vtree.bind("<<TreeviewSelect>>", self._show_detail)
         self.vtree.bind("<Double-1>", self._vtree_dblclick)
-        self.detail_lbl = ttk.Label(f, text="Selecione uma tabela para ver a comparação coluna a coluna.", foreground="#73809B")
+        self.detail_lbl = ttk.Label(f, text="Selecione uma tabela para ver a comparação coluna a coluna.",
+                                    foreground="#73809B", wraplength=1100, justify="left")
         self.detail_lbl.pack(anchor="w")
-        dc = ("col", "model", "oracle", "status", "comment")
-        self.dtree = ttk.Treeview(f, columns=dc, show="headings")
-        for c, t, w in (("col", "Coluna", 200), ("model", "Tipo no modelo", 140), ("oracle", "Tipo no Oracle", 140),
-                        ("status", "Situação", 150), ("comment", "Comentário no dicionário", 380)):
-            self.dtree.heading(c, text=t)
-            self.dtree.column(c, width=w, anchor="w")
+        box, self.dtree = make_tree(f, [("col", "Coluna", 200), ("model", "Tipo no modelo", 140), ("oracle", "Tipo no Oracle", 140),
+                                        ("status", "Situação", 150), ("comment", "Comentário no dicionário", 380)], height=10)
+        box.pack(fill="both", expand=True, pady=(4, 0))
         self.dtree.tag_configure("falta", foreground="#b91c1c")
         self.dtree.tag_configure("extra", foreground="#b45309")
         self.dtree.tag_configure("tipo", foreground="#7c3aed")
-        self.dtree.pack(fill="both", expand=True, pady=(4, 0))
         self.action_buttons.append(self.btn_analyze)
-
-    def _need_conn(self):
-        if self.conn is None:
-            messagebox.showinfo("Oracle", "Conecte-se primeiro (aba 1).", parent=self)
-            self.nb.select(0)
-            return False
-        return True
 
     def _target(self):
         try:
@@ -268,7 +560,7 @@ class OracleDialog(tk.Toplevel):
             messagebox.showinfo("Oracle", "O modelo não gerou nenhuma tabela (no dimensional, marque entidades como "
                                           "Dimensão/Fato).", parent=self)
             return
-        conn, stmts, views = self.conn, self.statements, self.views
+        conn, stmts, views = self.sess.conn, self.statements, self.sess.views
 
         def work():
             statuses, expected, meta = O.analyze(conn, stmts, target, views)
@@ -286,24 +578,45 @@ class OracleDialog(tk.Toplevel):
             n = {k: sum(1 for s in self.statuses if s.state == k) for k in STATE_LABEL}
             self.status.config(text=f"{len(self.statuses)} tabelas do modelo: {n['NOVA']} novas, {n['NO_DESTINO']} já no "
                                     f"destino, {n['EM_OUTRO_SCHEMA']} em outro schema.")
-            self.nb.select(1)
+            self.nb.select(2)
         self._bg(work, done, "Lendo o dicionário de dados…")
 
+    def _has_diff(self, s):
+        d = s.diff or {}
+        return bool(d.get("missing") or d.get("type_diff") or d.get("extra"))
+
     def _fill_verify(self):
+        for key, lbl in self.cards.items():
+            if key == "total":
+                lbl.config(text=str(len(self.statuses)))
+            elif key == "diff":
+                lbl.config(text=str(sum(1 for s in self.statuses if s.state != "NOVA" and self._has_diff(s))))
+            else:
+                lbl.config(text=str(sum(1 for s in self.statuses if s.state == key)))
+        flt, q = self.filter_var.get(), self.vsearch.get().strip().upper()
         self.vtree.delete(*self.vtree.get_children())
         for s in self.statuses:
+            if q and q not in s.name:
+                continue
+            if flt == "Novas" and s.state != "NOVA":
+                continue
+            if flt == "Já existem no destino" and s.state != "NO_DESTINO":
+                continue
+            if flt == "Existem em outro schema" and s.state != "EM_OUTRO_SCHEMA":
+                continue
+            if flt == "Com diferenças" and not (s.state != "NOVA" and self._has_diff(s)):
+                continue
             tag = "CONFLITO" if s.conflict else s.state
             diff = ""
             if s.state != "NOVA":
-                d = s.diff
-                bits = []
+                d, bits = s.diff, []
                 if d.get("missing"):
                     bits.append(f"faltam {len(d['missing'])}")
                 if d.get("type_diff"):
                     bits.append(f"tipo diferente {len(d['type_diff'])}")
                 if d.get("extra"):
                     bits.append(f"a mais {len(d['extra'])}")
-                diff = ", ".join(bits) or "colunas iguais ao modelo"
+                diff = ", ".join(bits) or "✔ colunas iguais ao modelo"
             if s.conflict:
                 diff = f"⚠ já existe {s.conflict} com esse nome no destino"
             where = "—"
@@ -329,7 +642,13 @@ class OracleDialog(tk.Toplevel):
         elif col == "#3" and len(s.owners) > 1:
             self.owner_idx[s.name] = (self.owner_idx.get(s.name, 0) + 1) % len(s.owners)
         self._fill_verify()
-        self.vtree.selection_set(item)
+        if self.vtree.exists(item):
+            self.vtree.selection_set(item)
+
+    def _owner_of(self, s):
+        if s.state == "NO_DESTINO":
+            return self.target_var.get().upper()
+        return s.owners[self.owner_idx.get(s.name, 0) % len(s.owners)] if s.owners else None
 
     def _show_detail(self, _e=None):
         sel = self.vtree.selection()
@@ -338,7 +657,7 @@ class OracleDialog(tk.Toplevel):
             return
         s = next(x for x in self.statuses if x.name == sel[0])
         exp_cols = self.expected[s.name]["columns"]
-        owner = self.target_var.get().upper() if s.state == "NO_DESTINO" else (s.owners[self.owner_idx.get(s.name, 0) % len(s.owners)] if s.owners else None)
+        owner = self._owner_of(s)
         m = self.meta.get((owner, s.name)) if owner else None
         head = f"{s.name}"
         if m is not None:
@@ -346,7 +665,7 @@ class OracleDialog(tk.Toplevel):
             if m["pk"]:
                 head += f"  ·  PK: {', '.join(m['pk'])}"
             if m["fks"]:
-                head += f"  ·  FKs: " + "; ".join(f"{'/'.join(f['columns'])} → {f['ref_table']}" for f in m["fks"])
+                head += "  ·  FKs: " + "; ".join(f"{'/'.join(f['columns'])} → {f['ref_table']}" for f in m["fks"])
         self.detail_lbl.config(text=head)
         act = {c["name"]: c for c in (m["columns"] if m else [])}
         seen = set()
@@ -363,10 +682,50 @@ class OracleDialog(tk.Toplevel):
             if n not in seen:
                 self.dtree.insert("", "end", values=(n, "", a["type"], "só no Oracle", a["comment"]), tags=("extra",))
 
-    # ------------------------------------------------------------ aba 3: plano e execução
+    def goto_explorer(self):
+        sel = self.vtree.selection()
+        if not sel:
+            messagebox.showinfo("Dicionário", "Selecione uma tabela da lista.", parent=self)
+            return
+        s = next(x for x in self.statuses if x.name == sel[0])
+        owner = self._owner_of(s)
+        if not owner or s.state == "NOVA":
+            messagebox.showinfo("Dicionário", "Essa tabela ainda não existe no Oracle.", parent=self)
+            return
+        self.ex_schema.set(owner)
+        self.nb.select(1)
+        self.ex_load_tables()
+        self.after(600, lambda: self._ex_pick(s.name))
+
+    def _ex_pick(self, name):
+        if self.ex_tree.exists(name):
+            self.ex_tree.selection_set(name)
+            self.ex_tree.see(name)
+        else:
+            self.after(400, lambda: self._ex_pick(name) if self.ex_tree.exists(name) else None)
+
+    def export_csv(self):
+        if not self.statuses:
+            messagebox.showinfo("Exportar", "Faça a verificação antes.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                                            initialfile=f"comparacao_{self.target_var.get().lower()}.csv")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Tabela", "Situação", "Schema", "Ação", "Colunas faltando", "Tipo diferente", "Colunas a mais"])
+            for s in self.statuses:
+                d = s.diff or {}
+                w.writerow([s.name, STATE_LABEL[s.state], self._owner_of(s) or "", ACTION_LABEL[s.action],
+                            ", ".join(d.get("missing", [])), ", ".join(f"{n}: {a} ≠ {b}" for n, a, b in d.get("type_diff", [])),
+                            ", ".join(d.get("extra", []))])
+        self.status.config(text=f"Comparação exportada para {path}")
+
+    # ------------------------------------------------------------ aba 4: plano e execução
     def _build_plan_tab(self):
         f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="3. Plano e execução")
+        self.nb.add(f, text="4. Plano e execução")
         bar = ttk.Frame(f)
         bar.pack(fill="x")
         self.btn_plan = ttk.Button(bar, text="📋 Gerar plano", command=self.make_plan)
@@ -377,21 +736,17 @@ class OracleDialog(tk.Toplevel):
         self.btn_run.pack(side="right")
         ttk.Button(bar, text="💾 Salvar script…", command=self.save_script).pack(side="right", padx=6)
         ttk.Button(bar, text="📋 Copiar", command=self.copy_script).pack(side="right")
-        cols = ("on", "kind", "table", "sql")
-        self.ptree = ttk.Treeview(f, columns=cols, show="headings", height=11)
-        for c, t, w in (("on", "✔", 36), ("kind", "Tipo", 90), ("table", "Tabela", 190), ("sql", "Comando", 640)):
-            self.ptree.heading(c, text=t)
-            self.ptree.column(c, width=w, anchor="w" if c != "on" else "center", stretch=(c == "sql"))
+        box, self.ptree = make_tree(f, [("on", "✔", 36), ("kind", "Tipo", 90), ("table", "Tabela", 200), ("sql", "Comando", 760)],
+                                    height=12, anchors={"on": "center"})
+        box.pack(fill="both", expand=True, pady=8)
         self.ptree.tag_configure("off", foreground="#9CA3AF")
-        self.ptree.tag_configure("grant", background="#FFF7ED")
-        self.ptree.tag_configure("synonym", background="#FFF7ED")
-        self.ptree.tag_configure("schema", background="#FEE2E2")
-        self.ptree.pack(fill="both", expand=True, pady=8)
+        for k, bg in (("grant", "#FFF7ED"), ("synonym", "#FFF7ED"), ("schema", "#FEE2E2")):
+            self.ptree.tag_configure(k, background=bg)
         self.ptree.bind("<Button-1>", self._ptree_click)
         self.plan_lbl = ttk.Label(f, text="Clique em ✔ para incluir/excluir um comando. Nada roda até você confirmar.",
                                   foreground="#73809B")
         self.plan_lbl.pack(anchor="w")
-        self.txt = tk.Text(f, height=9, font=("Consolas", 9), wrap="word", bg="#F8F9FE")
+        self.txt = tk.Text(f, height=8, font=("Consolas", 9), wrap="word", bg="#F8F9FE")
         self.txt.pack(fill="x", pady=(6, 0))
         self.txt.tag_configure("warn", foreground="#b45309")
         self.txt.tag_configure("ok", foreground="#15803d")
@@ -404,14 +759,14 @@ class OracleDialog(tk.Toplevel):
 
     def make_plan(self):
         if not self.statuses:
-            messagebox.showinfo("Plano", "Faça a verificação (aba 2) antes.", parent=self)
-            self.nb.select(1)
+            messagebox.showinfo("Plano", "Faça a verificação (aba 3) antes.", parent=self)
+            self.nb.select(2)
             return
         target = self._target()
         if not target:
             return
         create_schema = None
-        exists = target in set(self._schemas())
+        exists = target in set(self.sess.schemas)
         if self.mkschema_var.get() and not exists:
             create_schema = {"password": self.newpwd_var.get(), "tablespace": self.ts_var.get().strip() or "USERS"}
         elif not exists:
@@ -422,7 +777,7 @@ class OracleDialog(tk.Toplevel):
         try:
             self.steps, self.notes = O.build_plan(
                 self.statements, self.statuses, self.expected, self._connected_user(), target, owner_choice,
-                self.grants, self.synonyms, self.sync_var.get(), self.meta, create_schema, self.privs or None)
+                self.grants, self.synonyms, self.sync_var.get(), self.meta, create_schema, self.sess.privs or None)
         except O.OracleError as ex:
             messagebox.showerror("Plano", str(ex), parent=self)
             return
@@ -432,18 +787,14 @@ class OracleDialog(tk.Toplevel):
             self._log(n, "warn" if n.startswith("⚠") else None)
         if not self.steps:
             self._log("Nada a fazer: todas as tabelas já existem e o acesso está concedido.", "ok")
-        self.nb.select(2)
-
-    def _schemas(self):
-        return list(self.target_cb.cget("values"))
+        self.nb.select(3)
 
     def _fill_plan(self):
         self.ptree.delete(*self.ptree.get_children())
         for i, st in enumerate(self.steps):
             sql = " ".join(st.shown().split())
-            tags = (st.kind,) if st.enabled else ("off",)
-            self.ptree.insert("", "end", iid=str(i), tags=tags,
-                              values=("☑" if st.enabled else "☐", st.kind, st.table, sql[:220]))
+            self.ptree.insert("", "end", iid=str(i), tags=((st.kind,) if st.enabled else ("off",)),
+                              values=("☑" if st.enabled else "☐", st.kind, st.table, sql[:260]))
         n = sum(1 for s in self.steps if s.enabled)
         self.plan_lbl.config(text=f"{n} de {len(self.steps)} comandos selecionados. DDL no Oracle confirma "
                                   f"automaticamente (não há rollback).")
@@ -495,14 +846,14 @@ class OracleDialog(tk.Toplevel):
             return
         cnt = lambda k: sum(1 for s in chosen if s.kind == k)
         msg = (f"Executar {len(chosen)} comandos no Oracle?\n\n"
-               f"Schema de destino: {target}\nBanco: {self.dsn_var.get()}\n\n"
+               f"Schema de destino: {target}\nBanco: {self.sess.cfg.dsn}\n\n"
                f"• {cnt('create')} CREATE TABLE  • {cnt('grant')} GRANT  • {cnt('synonym')} CREATE SYNONYM\n"
                f"• {cnt('insert')} INSERT  • {cnt('addcol')} ADD COLUMN  • {cnt('schema')} de schema/usuário\n\n"
                f"Comandos DDL confirmam automaticamente e não podem ser desfeitos.\n"
                f"Nenhuma tabela existente será apagada ou sobrescrita.")
         if not messagebox.askyesno("Confirmar execução", msg, icon="warning", parent=self):
             return
-        conn, connected, stop = self.conn, self._connected_user(), self.stop_var.get()
+        conn, connected, stop = self.sess.conn, self._connected_user(), self.stop_var.get()
         logs = []
         self.txt.delete("1.0", "end")
 
@@ -523,7 +874,9 @@ class OracleDialog(tk.Toplevel):
             else:
                 messagebox.showinfo("Execução concluída", f"{ok} comandos executados em {target}.\nA verificação será atualizada.",
                                     parent=self)
-            self.analyze()          # relê o dicionário: confirma o que existe agora
+            self.analyze()
+            if self.ex_schema.get():
+                self.ex_load_tables()
         self._bg(work, done, "Executando no Oracle…")
 
     def _write_log(self, results, target):
@@ -532,7 +885,7 @@ class OracleDialog(tk.Toplevel):
             os.makedirs(d, exist_ok=True)
             p = os.path.join(d, f"exec_{datetime.datetime.now():%Y%m%d_%H%M%S}.log")
             with open(p, "w", encoding="utf-8") as f:
-                f.write(f"Schema: {target}  DSN: {self.dsn_var.get()}  Usuário: {self._connected_user()}\n")
+                f.write(f"Schema: {target}  DSN: {self.sess.cfg.dsn}  Usuário: {self._connected_user()}\n")
                 for st, ok, msg in results:
                     f.write(f"{'OK  ' if ok else 'ERRO'} [{st.kind}] {st.table}: {msg}\n    {' '.join(st.shown().split())[:300]}\n")
             return p
