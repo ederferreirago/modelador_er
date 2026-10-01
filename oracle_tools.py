@@ -75,9 +75,90 @@ def connect(cfg, password):
         raise OracleError(_clean_ora(ex)) from ex
 
 
+def is_alive(conn):
+    """True se a conexão ainda responde (ping leve; não lança exceção)."""
+    if conn is None:
+        return False
+    try:
+        conn.ping()
+        return True
+    except Exception:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM dual")
+            cur.fetchall()
+            cur.close()
+            return True
+        except Exception:
+            return False
+
+
 def _clean_ora(ex):
     msg = str(ex).strip().splitlines()[0] if str(ex).strip() else ex.__class__.__name__
     return msg
+
+
+class OracleSession:
+    """Conexão Oracle que vive enquanto o app estiver aberto (não morre ao fechar a janela do Oracle).
+
+    A senha NÃO é guardada: se a conexão cair, é preciso informá-la de novo."""
+
+    def __init__(self):
+        self.conn = None
+        self.cfg = ConnConfig()
+        self.info = {}
+        self.views = "all"
+        self.privs = set()
+        self.schemas = []
+        self.tablespaces = []
+
+    @property
+    def connected(self):
+        return self.conn is not None
+
+    def check(self):
+        """Confere se ainda está viva; se caiu, limpa o estado e devolve False."""
+        if self.conn is None:
+            return False
+        if is_alive(self.conn):
+            return True
+        self._drop()
+        return False
+
+    def open(self, cfg, password):
+        conn = connect(cfg, password)
+        try:
+            info = session_info(conn)
+            data = dict(views=detect_views(conn), privs=session_privileges(conn), schemas=list_schemas(conn),
+                        tablespaces=list_tablespaces(conn))
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        self.close()
+        self.conn, self.cfg, self.info = conn, cfg, info
+        self.views, self.privs = data["views"], data["privs"]
+        self.schemas, self.tablespaces = data["schemas"], data["tablespaces"]
+        return self
+
+    def _drop(self):
+        self.conn = None
+        self.info = {}
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self._drop()
+
+    def label(self):
+        if not self.conn:
+            return "Oracle: desconectado"
+        return f"Oracle: {self.info.get('user', '')}@{self.cfg.dsn}"
 
 
 # ---------------------------------------------------------------- consultas ao dicionário
@@ -274,6 +355,123 @@ def existing_synonyms(conn, schema, names, views="all"):
                                      "WHERE owner = :owner AND synonym_name IN (" + in_sql + ")", dict(binds, owner=schema)):
             out[s] = (to, tn)
     return out
+
+
+# ---------------------------------------------------------------- explorador do dicionário
+def list_tables(conn, owner, views="all"):
+    """Tabelas de um schema com resumo: [{'name','rows','analyzed','tablespace','comment','partitioned','temporary'}]."""
+    owner = check_ident(owner, "schema")
+    rows = _rows(conn,
+                 "SELECT t.table_name, t.num_rows, t.last_analyzed, t.tablespace_name, c.comments, "
+                 "t.partitioned, t.temporary "
+                 f"FROM {views}_tables t LEFT JOIN {views}_tab_comments c "
+                 "ON c.owner = t.owner AND c.table_name = t.table_name "
+                 "WHERE t.owner = :owner ORDER BY t.table_name", {"owner": owner})
+    return [{"name": r[0], "rows": r[1], "analyzed": r[2], "tablespace": r[3] or "", "comment": r[4] or "",
+             "partitioned": (r[5] or "NO") == "YES", "temporary": (r[6] or "N") == "Y"} for r in rows]
+
+
+def table_details(conn, owner, table, views="all"):
+    """Tudo sobre uma tabela: resumo, colunas, constraints, índices, privilégios e FKs que a referenciam."""
+    owner, table = check_ident(owner, "schema"), check_ident(table, "tabela")
+    b = {"owner": owner, "t": table}
+    summary = {}
+    for r in _rows(conn, "SELECT t.num_rows, t.last_analyzed, t.tablespace_name, t.partitioned, t.temporary, c.comments "
+                         f"FROM {views}_tables t LEFT JOIN {views}_tab_comments c "
+                         "ON c.owner = t.owner AND c.table_name = t.table_name "
+                         "WHERE t.owner = :owner AND t.table_name = :t", b):
+        summary = {"rows": r[0], "analyzed": r[1], "tablespace": r[2] or "", "partitioned": (r[3] or "NO") == "YES",
+                   "temporary": (r[4] or "N") == "Y", "comment": r[5] or ""}
+    meta = read_table_metadata(conn, owner, [table], views).get(table, {})
+    # constraints com colunas (P, U, R, C)
+    cons = {}
+    for name, ctype, status, rule, r_owner, r_name, cond in _rows(
+            conn, "SELECT constraint_name, constraint_type, status, delete_rule, r_owner, r_constraint_name, "
+                  f"search_condition FROM {views}_constraints WHERE owner = :owner AND table_name = :t "
+                  "AND constraint_type IN ('P','U','R','C') ORDER BY constraint_type, constraint_name", b):
+        cons[name] = {"name": name, "type": ctype, "status": status, "delete_rule": rule or "",
+                      "r_owner": r_owner, "r_name": r_name, "columns": [], "ref_table": "",
+                      "condition": (str(cond) if cond is not None else "")}
+    for name, col in _rows(conn, f"SELECT constraint_name, column_name FROM {views}_cons_columns "
+                                 "WHERE owner = :owner AND table_name = :t ORDER BY constraint_name, position", b):
+        if name in cons:
+            cons[name]["columns"].append(col)
+    for c in cons.values():
+        if c["type"] == "R" and c["r_name"]:
+            ref = _rows(conn, f"SELECT table_name FROM {views}_constraints WHERE owner = :o AND constraint_name = :c",
+                        {"o": c["r_owner"], "c": c["r_name"]})
+            c["ref_table"] = ref[0][0] if ref else "?"
+    # índices
+    idx = {}
+    for name, uniq, itype, status in _rows(conn, "SELECT index_name, uniqueness, index_type, status "
+                                                 f"FROM {views}_indexes WHERE table_owner = :owner AND table_name = :t "
+                                                 "ORDER BY index_name", b):
+        idx[name] = {"name": name, "unique": uniq == "UNIQUE", "type": itype, "status": status, "columns": []}
+    for name, col in _rows(conn, f"SELECT index_name, column_name FROM {views}_ind_columns "
+                                 "WHERE table_owner = :owner AND table_name = :t ORDER BY index_name, column_position", b):
+        if name in idx:
+            idx[name]["columns"].append(col)
+    # quem referencia esta tabela (FKs filhas)
+    children = []
+    for tname, cname, rule in _rows(
+            conn, "SELECT c.table_name, c.constraint_name, c.delete_rule "
+                  f"FROM {views}_constraints c JOIN {views}_constraints p "
+                  "ON p.owner = c.r_owner AND p.constraint_name = c.r_constraint_name "
+                  "WHERE c.constraint_type = 'R' AND p.owner = :owner AND p.table_name = :t "
+                  "ORDER BY c.table_name, c.constraint_name", b):
+        children.append({"table": tname, "constraint": cname, "delete_rule": rule or ""})
+    # privilégios concedidos sobre a tabela
+    ocol = "table_schema" if views == "all" else "owner"
+    privs = [{"grantee": g, "privilege": p, "grantable": gr == "YES"} for g, p, gr in _rows(
+        conn, f"SELECT grantee, privilege, grantable FROM {views}_tab_privs "
+              f"WHERE {ocol} = :owner AND table_name = :t ORDER BY grantee, privilege", b)]
+    return {"owner": owner, "table": table, "summary": summary, "columns": meta.get("columns", []),
+            "pk": meta.get("pk", []), "constraints": list(cons.values()), "indexes": list(idx.values()),
+            "children": children, "privileges": privs}
+
+
+def get_ddl(conn, owner, table):
+    """DDL real da tabela via DBMS_METADATA (pode exigir privilégio); devolve texto ou levanta OracleError."""
+    owner, table = check_ident(owner, "schema"), check_ident(table, "tabela")
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :o) FROM dual", {"t": table, "o": owner})
+        row = cur.fetchone()
+        val = row[0] if row else ""
+        return val.read() if hasattr(val, "read") else str(val or "")
+    except Exception as ex:
+        raise OracleError(_clean_ora(ex)) from ex
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+def sample_rows(conn, owner, table, limit=50):
+    """Amostra somente-leitura: (colunas, linhas). Identificadores validados e entre aspas."""
+    owner, table = check_ident(owner, "schema"), check_ident(table, "tabela")
+    limit = max(1, min(int(limit), 500))
+    cur = conn.cursor()
+    try:
+        cur.execute(f'SELECT * FROM "{owner}"."{table}" FETCH FIRST {limit} ROWS ONLY')
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return cols, rows
+    except Exception as ex:
+        raise OracleError(_clean_ora(ex)) from ex
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+def count_objects(conn, owner, views="all"):
+    """Contagem de objetos do schema por tipo: {'TABLE': n, 'VIEW': n, ...}."""
+    owner = check_ident(owner, "schema")
+    return {t: n for t, n in _rows(conn, f"SELECT object_type, COUNT(*) FROM {views}_objects WHERE owner = :owner "
+                                         "GROUP BY object_type ORDER BY object_type", {"owner": owner})}
 
 
 # ---------------------------------------------------------------- análise do script DDL
