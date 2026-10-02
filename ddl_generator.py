@@ -101,6 +101,7 @@ class _Ctx:
         self.used = {}          # tabela -> colunas já declaradas
         self.tables = []        # tabelas criadas (ordem)
         self.domain_tables = {}  # domain.id -> nome da tabela de domínio
+        self.rel_fks = {}       # (tabela, rel_id) -> lista de nomes de colunas FK
 
     # ---------- nomes ----------
     def s(self, name):
@@ -509,6 +510,7 @@ def generate_ddl(project, dialect="postgres"):
                 c.add_column(ttbl, c.column(fk, map_type(dialect, ftype), False,
                                             f"FK para {c.t(ref)}.{ref_col} (relacionamento {r.name}){rel_note}"))
             fks = ", ".join(f for f, _, _ in fk_pairs)
+            c.rel_fks[(ttbl, r.id)] = [f for f, _, _ in fk_pairs]
             c.add_constraint(ttbl, f"CONSTRAINT {c.cname('uq', ttbl, fk_pairs[0][0])} UNIQUE ({fks})")
             c.add_constraint(ttbl, f"CONSTRAINT {c.cname('fk', ttbl, r.name)} FOREIGN KEY ({fks}) "
                                    f"REFERENCES {c.t(ref)}({', '.join(x for _, x, _ in fk_pairs)})")
@@ -533,6 +535,7 @@ def generate_ddl(project, dialect="postgres"):
                 c.add_column(mtbl, c.column(fk, map_type(dialect, ftype), nn,
                                             f"FK para {c.t(one_ent)}.{ref_col} (relacionamento {r.name}){rel_note}"))
             fks = ", ".join(f for f, _, _ in fk_pairs)
+            c.rel_fks[(mtbl, r.id)] = [f for f, _, _ in fk_pairs]
             c.add_constraint(mtbl, f"CONSTRAINT {c.cname('fk', mtbl, r.name, fk_pairs[0][0])} FOREIGN KEY ({fks}) "
                                    f"REFERENCES {c.t(one_ent)}({', '.join(x for _, x, _ in fk_pairs)})")
             out.append(index_stmt(dialect, mtbl, [f for f, _, _ in fk_pairs], c.cname("idx", mtbl, fk_pairs[0][0])))
@@ -541,6 +544,32 @@ def generate_ddl(project, dialect="postgres"):
                 c.add_column(mtbl, c.column(col, map_type(dialect, c.attr_type(ra)), False, c.comment_of(ra)))
                 c.alter_constraints_for(mtbl, col, ra)
             out.append("")
+
+    # Passo 4.1 — Arcos de Relacionamento (Oracle Designer / Notação de Barker)
+    arcs = getattr(project, "arcs", [])
+    if arcs:
+        out.append("-- Passo 4.1: Restrições de Arcos de Relacionamento (Exclusividade Mútua / Oracle Designer)")
+        for arc in arcs:
+            ent = project.find_entity(arc.entity_id)
+            if not ent:
+                continue
+            tbl = c.t(ent)
+            # Para cada relacionamento do arco, descobre a primeira coluna FK presente na tabela da entidade
+            fk_cols_per_rel = []
+            for rid in arc.rel_ids:
+                fks = c.rel_fks.get((tbl, rid))
+                if fks:
+                    fk_cols_per_rel.append(fks[0])
+            if len(fk_cols_per_rel) >= 2:
+                arc_name = arc.name or f"arc_{ent.name}"
+                c_name = c.cname("ck", tbl, arc_name, arc.id[:6] if hasattr(arc, "id") and arc.id else "")
+                terms = [f"(CASE WHEN {col} IS NOT NULL THEN 1 ELSE 0 END)" for col in fk_cols_per_rel]
+                sum_expr = " + ".join(terms)
+                op = "= 1" if arc.mandatory else "<= 1"
+                desc = "obrigatório (exatamente um)" if arc.mandatory else "opcional (no máximo um)"
+                c.add_constraint(tbl, f"CONSTRAINT {c_name} CHECK ({sum_expr} {op})")
+                out.append(f"-- Arco '{arc_name}' em {ent.name} ({desc}): restrição {c_name}")
+        out.append("")
 
     # Passo 5 — M:N
     out.append("-- Passo 5: Tabelas Associativas para Relacionamentos M:N")

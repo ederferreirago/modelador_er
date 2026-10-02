@@ -68,17 +68,18 @@ def _enable_windows_dpi_awareness():
 
 
 class Tooltip:
-    """Dica flutuante simples (aparece após 600 ms sobre o widget)."""
+    """Dica flutuante rápida e responsiva (aparece após 220 ms sobre o widget)."""
 
-    def __init__(self, widget, text):
+    def __init__(self, widget, text, delay=220):
         self.widget, self.text, self.tip, self._job = widget, text, None, None
+        self.delay = delay
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
 
     def _schedule(self, _e=None):
         self._hide()
-        self._job = self.widget.after(600, self._show)
+        self._job = self.widget.after(self.delay, self._show)
 
     def _show(self):
         if self.tip or not self.text:
@@ -189,7 +190,7 @@ class App(tk.Tk):
         self.notation = getattr(self.project, 'notation', 'chen')
 
         self._configure_styles()
-        self._build_office_header()
+        # _build_office_header removido conforme solicitação do usuário para ganho de espaço visual
         self._build_office_ribbon()
         self._build_quick_toolbar()
         self._build_document_tabs()
@@ -220,6 +221,9 @@ class App(tk.Tk):
             "<Control-Shift-Z>": self.redo, "<Control-Shift-z>": self.redo,
             "<Control-s>": self.save_project, "<Control-S>": self.save_project_as,
             "<Control-o>": self.load_project, "<Control-n>": self.new_project,
+            "<Control-i>": self.open_import_dialog, "<Control-I>": self.open_import_dialog,
+            "<Control-h>": self.align_rel_horizontal, "<Control-H>": self.align_rel_horizontal,
+            "<Control-Shift-H>": self.align_rel_vertical, "<Control-Shift-h>": self.align_rel_vertical,
             "<Control-d>": self.duplicate_selected, "<Control-D>": self.duplicate_selected,
             "<Control-0>": self.zoom_fit, "<Control-1>": self.zoom_reset,
             "<Control-plus>": self.zoom_in, "<Control-equal>": self.zoom_in, "<Control-minus>": self.zoom_out,
@@ -516,41 +520,8 @@ class App(tk.Tk):
 
     # ---------------- Barra Superior Office 365 (Header) ----------------
     def _build_office_header(self):
-        header = tk.Frame(self, bg="#5948E8", height=44)
-        header.pack(side="top", fill="x")
-        header.pack_propagate(False)
-
-        # Lado esquerdo: Logo e Nome do Aplicativo
-        left_box = tk.Frame(header, bg="#5948E8")
-        left_box.pack(side="left", padx=12, fill="y")
-
-        lbl_icon = tk.Label(left_box, text="📊", bg="#5948E8", fg="#ffffff", font=("Segoe UI", 12))
-        lbl_icon.pack(side="left", padx=(0, 6))
-
-        lbl_title = tk.Label(left_box, text="Modelador ER", bg="#5948E8", fg="#ffffff", font=("Segoe UI", 10, "bold"))
-        lbl_title.pack(side="left")
-
-        lbl_sub = tk.Label(left_box, text="— Notação de Chen & Diagramas Relacionais",
-                           bg="#5948E8", fg="#EEEAFE", font=("Segoe UI", 8))
-        lbl_sub.pack(side="left", padx=(6, 12))
-
-        # Status / Auto-save Pill
-        pill = tk.Label(left_box, text="🟢 Rascunho automático", bg="#4938D0", fg="#F1EEFF",
-                        font=("Segoe UI", 8, "bold"), padx=8, pady=2)
-        pill.pack(side="left")
-
-        # Lado direito: Ações Rápidas
-        right_box = tk.Frame(header, bg="#5948E8")
-        right_box.pack(side="right", padx=10, fill="y")
-
-        btn_quick_save = tk.Button(right_box, text="💾 Salvar", bg="#4938D0", fg="#ffffff",
-                                   activebackground="#3E2FAF", activeforeground="#ffffff",
-                                   relief="flat", font=("Segoe UI", 8, "bold"), padx=8, pady=2,
-                                   command=self.save_project)
-        btn_quick_save.pack(side="right", padx=4, pady=5)
-        tk.Button(right_box, text="❓ Atalhos (F1)", bg="#4938D0", fg="#ffffff", activebackground="#3E2FAF",
-                  activeforeground="#ffffff", relief="flat", font=("Segoe UI", 8, "bold"), padx=8, pady=2,
-                  command=self.show_help).pack(side="right", padx=4, pady=5)
+        """Removido para maximizar a área de trabalho do canvas."""
+        pass
 
     # ---------------- Faixa de Opções (Ribbon) Office 365 ----------------
     def _build_office_ribbon(self):
@@ -2499,7 +2470,10 @@ class App(tk.Tk):
             menu.add_separator()
             menu.add_command(label="🔗 Relacionar entidades", command=self.toggle_link)
             menu.add_command(label="⬡ Relacionamento n-ário", command=self.toggle_nary)
+            menu.add_command(label="⌒ Novo arco de exclusividade (Barker)…", command=self.open_arc_dialog)
             menu.add_separator()
+            menu.add_command(label="⚡ Auto-alinhar todos os relacionamentos", command=self.auto_align_all_relationships)
+            menu.add_command(label="📥 Importar modelo conceitual…", command=self.open_import_dialog)
             menu.add_command(label="⛶ Ajustar tudo (Ctrl+0)", command=self.zoom_fit)
             menu.add_command(label="✔ Validar modelo (F5)", command=self.validate_model)
         else:
@@ -2512,6 +2486,7 @@ class App(tk.Tk):
                 self.render()
                 menu.add_command(label=f"✏ Editar '{e.name}'…  (F2)", command=lambda: self._open_entity_dialog(e))
                 menu.add_command(label="○ Adicionar atributo", command=lambda: self._add_attr_to_entity(e))
+                menu.add_command(label="⌒ Criar arco de exclusividade (Barker)…", command=lambda: self.open_arc_dialog())
                 menu.add_command(label="⧉ Duplicar entidade", command=lambda: self._duplicate_entity(e))
                 menu.add_separator()
                 menu.add_command(label="🔗 Relacionar a partir daqui", command=lambda: self._start_link_from(e))
@@ -2536,6 +2511,13 @@ class App(tk.Tk):
                 menu.add_command(label=f"✏ Editar '{r.name}'…  (F2)", command=lambda: self._open_rel_dialog(r))
                 menu.add_command(label="○ Adicionar atributo ao relacionamento", command=lambda: self._add_attr_to_rel(r))
                 if not r.is_nary:
+                    menu.add_command(label="━ Alinhar horizontalmente (mesmo Y) · Ctrl+H",
+                                     command=lambda rel=r: self.align_rel_horizontal(rel))
+                    menu.add_command(label="┃ Alinhar verticalmente (mesmo X) · Ctrl+Shift+H",
+                                     command=lambda rel=r: self.align_rel_vertical(rel))
+                    menu.add_command(label="⚡ Auto-alinhar relacionamento",
+                                     command=lambda rel=r: self.auto_align_selected_rel())
+                    menu.add_separator()
                     menu.add_command(label="⇄ Inverter direção (lado 1 ⇄ lado 2)", command=lambda: self.swap_relationship(r))
                     menu.add_command(label=("◇ Tornar regular" if r.is_identifying else "◈ Tornar identificador"),
                                      command=lambda: self._toggle_identifying(r))
@@ -3120,6 +3102,96 @@ class App(tk.Tk):
         for e in sorted(self.project.entities, key=lambda x: L[x.id]["depth"] if x.id in L else 0):
             if e.id in L:
                 self._draw_bk_entity(e, L[e.id])
+        self._draw_bk_arcs(L)
+
+    def _draw_bk_arcs(self, L):
+        """Renderiza os Arcos de Exclusividade Barker / Oracle Designer (XOR).
+
+        O arco é desenhado como uma curva contínua (sólida para obrigatório ou tracejada para opcional)
+        atravessando os conectores dos relacionamentos participantes próximos à entidade âncora.
+        """
+        if not hasattr(self.project, "arcs") or not self.project.arcs:
+            return
+        z = self.zoom
+        routes = self._bk_routes()
+
+        for arc in self.project.arcs:
+            ent = self.project.find_entity(arc.entity_id)
+            if not ent or ent.id not in L:
+                continue
+            box = L[ent.id]
+            cx, cy = box["x"] + box["w"] / 2.0, box["y"] + box["h"] / 2.0
+
+            arc_pts = []
+            for rid in arc.rel_ids:
+                rel = self.project.find_rel(rid)
+                if not rel or rel.is_nary:
+                    continue
+                rt = routes.get((rel.id, 0))
+                if not rt or not rt.get("pts"):
+                    continue
+                pts = rt["pts"]
+                if rel.entity1_id == ent.id:
+                    p0 = pts[0]
+                    norm = rt.get("na", (0, 1))
+                elif rel.entity2_id == ent.id:
+                    p0 = pts[-1]
+                    nb = rt.get("nb", (0, 1))
+                    norm = (-nb[0], -nb[1])
+                else:
+                    continue
+
+                cross_x = p0[0] + norm[0] * 24.0
+                cross_y = p0[1] + norm[1] * 24.0
+                ang = math.atan2(cross_y - cy, cross_x - cx)
+                arc_pts.append((ang, cross_x, cross_y))
+
+            if len(arc_pts) < 2:
+                continue
+
+            arc_pts.sort(key=lambda t: t[0])
+
+            if len(arc_pts) == 2:
+                p1 = (arc_pts[0][1], arc_pts[0][2])
+                p2 = (arc_pts[1][1], arc_pts[1][2])
+                mid_x = (p1[0] + p2[0]) / 2.0
+                mid_y = (p1[1] + p2[1]) / 2.0
+                vx, vy = mid_x - cx, mid_y - cy
+                vlen = math.hypot(vx, vy) or 1.0
+                arc_h = 10.0
+                bend_x = mid_x + (vx / vlen) * arc_h
+                bend_y = mid_y + (vy / vlen) * arc_h
+                curve_pts = [p1, (bend_x, bend_y), p2]
+            else:
+                curve_pts = [(p[1], p[2]) for p in arc_pts]
+
+            screen_pts = [self.to_screen(px, py) for px, py in curve_pts]
+            flat_coords = [c for pt in screen_pts for c in pt]
+
+            color = "#18233D"
+            lw = max(1.6, 2.2 * z)
+            dash = () if arc.mandatory else (max(4, int(5 * z)), max(3, int(3 * z)))
+            tag_name = f"arc_{arc.id}"
+
+            self.canvas.create_line(
+                *flat_coords,
+                smooth=True,
+                splinesteps=12,
+                fill=color,
+                width=lw,
+                dash=dash,
+                tags=("arc", tag_name)
+            )
+
+            mid_pt = screen_pts[len(screen_pts) // 2]
+            lbl = arc.name or "⌒"
+            self._draw_label_with_halo(
+                mid_pt[0], mid_pt[1] - 8 * z,
+                lbl,
+                self.font_scaled("Segoe UI", 7.5, "bold")
+            )
+
+            self.canvas.tag_bind(tag_name, "<Double-Button-1>", lambda _e, a=arc: self.open_arc_dialog(a))
 
     def _draw_bk_entity(self, e, L):
         z = self.zoom
@@ -3424,67 +3496,259 @@ DOMÍNIOS
         return widget
 
     def _build_quick_toolbar(self):
-        """Barra horizontal fixa (abaixo da faixa de opções): histórico, zoom/navegação, notação, exibição e busca."""
-        bar = tk.Frame(self, bg="#FFFFFF", height=40, highlightbackground="#DCE3F1", highlightthickness=1)
+        """Barra de ferramentas de alta produtividade apenas com ícones essenciais e tooltips explicativos."""
+        bar = tk.Frame(self, bg="#FFFFFF", height=38, highlightbackground="#DCE3F1", highlightthickness=1)
         bar.pack(side="top", fill="x")
         bar.pack_propagate(False)
         self.quick_bar = bar
 
         def sep():
-            tk.Frame(bar, bg="#DCE3F1", width=1).pack(side="left", fill="y", pady=8, padx=6)
+            tk.Frame(bar, bg="#E2E8F0", width=1).pack(side="left", fill="y", pady=6, padx=4)
 
-        def btn(text, cmd, tip, width=None):
-            b = ttk.Button(bar, text=text, command=cmd, style="Tool.TButton", **({"width": width} if width else {}))
-            b.pack(side="left", padx=1, pady=5)
+        def btn(icon, cmd, tip, width=3):
+            b = ttk.Button(bar, text=icon, command=cmd, style="Tool.TButton", width=width)
+            b.pack(side="left", padx=1, pady=4)
             self._tip(b, tip)
             return b
 
-        # histórico
+        # 1. Arquivo & Gestão de Modelos
+        btn("📄", self.new_project, "Novo Projeto · Ctrl+N", 3)
+        btn("📂", self.load_project, "Abrir Projeto… · Ctrl+O", 3)
+        btn("💾", self.save_project, "Salvar Projeto · Ctrl+S", 3)
+        btn("📥", self.open_import_dialog, "Importar Modelo (Excel / JSON / SQL / Oracle)… · Ctrl+I", 3)
+        btn("📤", self.export_pdf, "Exportar Documento PDF…", 3)
+        sep()
+
+        # 2. Histórico
         self.undo_btn = btn("↶", self.undo, "Desfazer · Ctrl+Z", 3)
         self.redo_btn = btn("↷", self.redo, "Refazer · Ctrl+Y", 3)
         self._update_undo_redo_buttons()
         sep()
-        # navegação / zoom
-        btn("🔍−", self.zoom_out, "Diminuir zoom · Ctrl+−", 4)
-        self.zoom_var = tk.StringVar(value="100%")
-        zc = ttk.Combobox(bar, textvariable=self.zoom_var, width=6, values=["25%", "50%", "75%", "100%", "125%", "150%", "200%", "300%"])
-        zc.pack(side="left", padx=1, pady=7)
-        zc.bind("<<ComboboxSelected>>", self._zoom_from_combo)
-        zc.bind("<Return>", self._zoom_from_combo)
-        self._tip(zc, "Escolha ou digite o zoom (25% a 300%)")
-        btn("🔍+", self.zoom_in, "Aumentar zoom · Ctrl++", 4)
-        btn("100%", self.zoom_reset, "Zoom 100% · Ctrl+1", 5)
-        btn("⛶ Ajustar", self.zoom_fit, "Ajustar o modelo inteiro à tela · Ctrl+0")
-        self.zoom_select_btn = btn("🔲 Área", self.toggle_zoom_select_mode,
-                                   "Arraste uma área do diagrama para dar zoom nela")
-        btn("🎯", self.center_selection, "Centralizar o elemento selecionado", 3)
+
+        # 3. Formas e Elementos Essenciais
+        btn("▢", lambda: self.add_entity_custom(is_weak=False), "Inserir Entidade Forte (Duplo-clique no fundo)", 3)
+        btn("⧉", lambda: self.add_entity_custom(is_weak=True), "Inserir Entidade Fraca", 3)
+        btn("◇", self.toggle_link, "Criar Relacionamento Binário · Ctrl+L", 3)
+        btn("◈", lambda: self.toggle_link(identifying=True), "Criar Relacionamento Identificador", 3)
+        btn("⬡", self.toggle_nary, "Criar Relacionamento N-ário (3+ Entidades)", 3)
+        btn("○", self.add_attribute_to_selected, "Adicionar Atributo ao Elemento Selecionado", 3)
+        btn("⌒", self.open_arc_dialog, "Arco de Exclusividade (Barker / Oracle Designer XOR)", 3)
         sep()
-        # notação
-        self.btn_chen_mode = tk.Button(bar, text="📐 Chen / EER", relief="flat", bd=1, padx=8, pady=3,
+
+        # 4. Alinhamento de Relacionamentos (Chen & Barker)
+        btn("━", self.align_rel_horizontal, "Alinhar Relacionamento Horizontalmente (mesmo Y) · Ctrl+H", 3)
+        btn("┃", self.align_rel_vertical, "Alinhar Relacionamento Verticalmente (mesmo X) · Ctrl+Shift+H", 3)
+        btn("⚡", self.auto_align_selected_rel, "Auto-alinhar Relacionamento Selecionado", 3)
+        btn("⚡⚡", self.auto_align_all_relationships, "Auto-alinhar Todos os Relacionamentos do Diagrama", 4)
+        sep()
+
+        # 5. Notação (Ícones Puros)
+        self.btn_chen_mode = tk.Button(bar, text="📐", relief="flat", bd=1, width=3, pady=2,
                                        command=lambda: self.set_notation("chen"), cursor="hand2")
-        self.btn_chen_mode.pack(side="left", padx=1, pady=6)
-        self.btn_table_mode = tk.Button(bar, text="📊 Barker", relief="flat", bd=1, padx=8, pady=3,
-                                        command=lambda: self.set_notation("barker"), cursor="hand2")
-        self.btn_table_mode.pack(side="left", padx=1, pady=6)
+        self.btn_chen_mode.pack(side="left", padx=1, pady=5)
         self._tip(self.btn_chen_mode, "Notação de Chen / EER (Navathe)")
-        self._tip(self.btn_table_mode, "Notação de Barker (visão lógica)")
+
+        self.btn_table_mode = tk.Button(bar, text="📊", relief="flat", bd=1, width=3, pady=2,
+                                        command=lambda: self.set_notation("barker"), cursor="hand2")
+        self.btn_table_mode.pack(side="left", padx=1, pady=5)
+        self._tip(self.btn_table_mode, "Notação de Barker (Engenharia de Informação)")
         self._sync_notation_buttons()
         sep()
-        # exibição
-        for text, var, cmd, tip in (("Grade", self.grid_var, self.toggle_grid, "Mostrar grade · Ctrl+G"),
-                                    ("Encaixar", self.snap_var, self.toggle_snap, "Alinhar elementos à grade ao arrastar"),
-                                    ("Legenda", self.legend_var, self.toggle_legend, "Mostrar a legenda da notação")):
-            cb = ttk.Checkbutton(bar, text=text, variable=var, command=cmd, style="Tool.Toolbutton")
-            cb.pack(side="left", padx=1, pady=5)
+
+        # 6. Zoom & Visualização (Ícones Puros)
+        btn("🔍−", self.zoom_out, "Diminuir Zoom · Ctrl+−", 4)
+        self.zoom_var = tk.StringVar(value="100%")
+        zc = ttk.Combobox(bar, textvariable=self.zoom_var, width=5, values=["50%", "75%", "100%", "125%", "150%", "200%"])
+        zc.pack(side="left", padx=1, pady=6)
+        zc.bind("<<ComboboxSelected>>", self._zoom_from_combo)
+        zc.bind("<Return>", self._zoom_from_combo)
+        self._tip(zc, "Nível de Zoom")
+        btn("🔍+", self.zoom_in, "Aumentar Zoom · Ctrl++", 4)
+        btn("1:1", self.zoom_reset, "Zoom Original 100% · Ctrl+1", 4)
+        btn("⛶", self.zoom_fit, "Ajustar Todo o Diagrama à Tela · Ctrl+0", 3)
+        btn("🎯", self.center_selection, "Centralizar Elemento Selecionado", 3)
+        sep()
+
+        # 7. Modos e Integrações (Ícones Puros)
+        for icon, var, cmd, tip in (
+            ("▦", self.grid_var, self.toggle_grid, "Exibir Grade · Ctrl+G"),
+            ("🧲", self.snap_var, self.toggle_snap, "Encaixar na Grade (Snap)"),
+            ("🏷", self.legend_var, self.toggle_legend, "Exibir Legenda da Notação"),
+        ):
+            cb = ttk.Checkbutton(bar, text=icon, variable=var, command=cmd, style="Tool.Toolbutton", width=3)
+            cb.pack(side="left", padx=1, pady=4)
             self._tip(cb, tip)
-        # busca (à direita)
+
+        btn("⚙", self.show_ddl, "Gerar Script DDL SQL · F9", 3)
+        btn("🔌", self.open_oracle, "Conexão Oracle & Dicionário de Dados", 3)
+        btn("✔", self.validate_model, "Validar Modelo · F5", 3)
+
+        # 8. Busca à Direita
         self.search_var = tk.StringVar()
-        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=18)
-        self.search_entry.pack(side="right", padx=(2, 10), pady=7)
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=16)
+        self.search_entry.pack(side="right", padx=(2, 8), pady=6)
         self.search_entry.bind("<Return>", lambda _e: self.find_element())
         self.search_entry.bind("<Escape>", lambda _e: (self.search_var.set(""), self.canvas.focus_set()))
         tk.Label(bar, text="🔎", bg="#FFFFFF", fg="#73809B", font=("Segoe UI", 9)).pack(side="right")
-        self._tip(self.search_entry, "Busca entidade, atributo ou relacionamento · Enter = próximo resultado · Ctrl+F")
+        self._tip(self.search_entry, "Busca (entidade, atributo, relacionamento) · Enter = próximo · Ctrl+F")
+
+    def open_import_dialog(self):
+        """Abre o diálogo universal para importação de modelos conceituais (Excel, JSON, SQL, etc)."""
+        from dialogs import ImportModelDialog
+        ImportModelDialog(self, self)
+
+    def open_arc_dialog(self, arc=None):
+        """Abre o diálogo para criação ou edição de Arcos de Exclusividade (Barker / Oracle Designer)."""
+        from dialogs import ArcDialog
+        if not self.project.entities:
+            messagebox.showinfo("Arco Barker", "O modelo precisa ter entidades e relacionamentos primeiro.", parent=self)
+            return
+        dlg = ArcDialog(self, self.project, arc=arc)
+        self.wait_window(dlg)
+        if dlg.result:
+            self._push_undo()
+            self._mark_active_dirty()
+            self.render()
+            self.status_msg.config(text=f"Arco '{dlg.result.name}' configurado com sucesso.")
+
+    def align_rel_horizontal(self, rel=None):
+        """Alinha as duas entidades conectadas pelo relacionamento no mesmo nível vertical Y.
+
+        - Centraliza o diamante (se Chen) exatamente na metade do caminho e no mesmo nível Y.
+        - Em Barker, como ambas as entidades passam a ter a mesma coordenada Y, o conector
+          torna-se uma linha 100% reta horizontal sem nenhum cotovelo/degrau.
+        """
+        if rel is None:
+            if self.selected_item and self.selected_item[0] == "rel":
+                rel = self.project.find_rel(self.selected_item[1])
+            elif self.selected_item and self.selected_item[0] == "entity":
+                eid = self.selected_item[1]
+                rels = [r for r in self.project.rels if eid in (r.entity1_id, r.entity2_id)]
+                if rels:
+                    rel = rels[0]
+        if not rel or rel.is_nary or rel.entity1_id == rel.entity2_id:
+            return
+        e1 = self.project.find_entity(rel.entity1_id)
+        e2 = self.project.find_entity(rel.entity2_id)
+        if not e1 or not e2:
+            return
+
+        self._push_undo()
+        self._mark_active_dirty()
+        h1 = self._ent_box(e1)[3]
+        h2 = self._ent_box(e2)[3]
+        center_y = (e1.y + h1 / 2 + e2.y + h2 / 2) / 2
+        e1.y = int(center_y - h1 / 2)
+        e2.y = int(center_y - h2 / 2)
+
+        if self.notation == "chen":
+            w1 = self._ent_box(e1)[2]
+            w2 = self._ent_box(e2)[2]
+            center_x1 = e1.x + w1 / 2
+            center_x2 = e2.x + w2 / 2
+            rel.pos_x = int((center_x1 + center_x2) / 2)
+            rel.pos_y = int(center_y)
+
+        self.render()
+        self.status_msg.config(text=f"Relacionamento '{rel.name}' alinhado horizontalmente.")
+
+    def align_rel_vertical(self, rel=None):
+        """Alinha as duas entidades conectadas pelo relacionamento na mesma coluna horizontal X.
+
+        - Centraliza o diamante (se Chen) exatamente no ponto médio Y e no mesmo nível X.
+        - Em Barker, o conector torna-se uma linha 100% reta vertical.
+        """
+        if rel is None:
+            if self.selected_item and self.selected_item[0] == "rel":
+                rel = self.project.find_rel(self.selected_item[1])
+            elif self.selected_item and self.selected_item[0] == "entity":
+                eid = self.selected_item[1]
+                rels = [r for r in self.project.rels if eid in (r.entity1_id, r.entity2_id)]
+                if rels:
+                    rel = rels[0]
+        if not rel or rel.is_nary or rel.entity1_id == rel.entity2_id:
+            return
+        e1 = self.project.find_entity(rel.entity1_id)
+        e2 = self.project.find_entity(rel.entity2_id)
+        if not e1 or not e2:
+            return
+
+        self._push_undo()
+        self._mark_active_dirty()
+        w1 = self._ent_box(e1)[2]
+        w2 = self._ent_box(e2)[2]
+        center_x = (e1.x + w1 / 2 + e2.x + w2 / 2) / 2
+        e1.x = int(center_x - w1 / 2)
+        e2.x = int(center_x - w2 / 2)
+
+        if self.notation == "chen":
+            h1 = self._ent_box(e1)[3]
+            h2 = self._ent_box(e2)[3]
+            center_y1 = e1.y + h1 / 2
+            center_y2 = e2.y + h2 / 2
+            rel.pos_x = int(center_x)
+            rel.pos_y = int((center_y1 + center_y2) / 2)
+
+        self.render()
+        self.status_msg.config(text=f"Relacionamento '{rel.name}' alinhado verticalmente.")
+
+    def auto_align_selected_rel(self):
+        """Detecta a orientação predominante (horizontal ou vertical) e alinha o relacionamento selecionado."""
+        rel = None
+        if self.selected_item and self.selected_item[0] == "rel":
+            rel = self.project.find_rel(self.selected_item[1])
+        elif self.selected_item and self.selected_item[0] == "entity":
+            eid = self.selected_item[1]
+            rels = [r for r in self.project.rels if eid in (r.entity1_id, r.entity2_id)]
+            if rels:
+                rel = rels[0]
+        if not rel or rel.is_nary:
+            messagebox.showinfo("Alinhar", "Selecione um relacionamento binário para alinhar.", parent=self)
+            return
+        e1 = self.project.find_entity(rel.entity1_id)
+        e2 = self.project.find_entity(rel.entity2_id)
+        if not e1 or not e2:
+            return
+        dx = abs((e2.x + self._ent_box(e2)[2] / 2) - (e1.x + self._ent_box(e1)[2] / 2))
+        dy = abs((e2.y + self._ent_box(e2)[3] / 2) - (e1.y + self._ent_box(e1)[3] / 2))
+        if dx >= dy:
+            self.align_rel_horizontal(rel)
+        else:
+            self.align_rel_vertical(rel)
+
+    def auto_align_all_relationships(self):
+        """Percorre todos os relacionamentos binários do diagrama e alinha cada um automaticamente."""
+        if not self.project.rels:
+            return
+        self._push_undo()
+        self._mark_active_dirty()
+        count = 0
+        for rel in self.project.rels:
+            if rel.is_nary or rel.entity1_id == rel.entity2_id:
+                continue
+            e1 = self.project.find_entity(rel.entity1_id)
+            e2 = self.project.find_entity(rel.entity2_id)
+            if not e1 or not e2:
+                continue
+            dx = abs((e2.x + self._ent_box(e2)[2] / 2) - (e1.x + self._ent_box(e1)[2] / 2))
+            dy = abs((e2.y + self._ent_box(e2)[3] / 2) - (e1.y + self._ent_box(e1)[3] / 2))
+            if dx >= dy:
+                h1 = self._ent_box(e1)[3]
+                h2 = self._ent_box(e2)[3]
+                center_y = (e1.y + h1 / 2 + e2.y + h2 / 2) / 2
+                e2.y = int(center_y - h2 / 2)
+                if self.notation == "chen":
+                    rel.pos_y = int(center_y)
+            else:
+                w1 = self._ent_box(e1)[2]
+                w2 = self._ent_box(e2)[2]
+                center_x = (e1.x + w1 / 2 + e2.x + w2 / 2) / 2
+                e2.x = int(center_x - w2 / 2)
+                if self.notation == "chen":
+                    rel.pos_x = int(center_x)
+            count += 1
+        self.render()
+        self.status_msg.config(text=f"{count} relacionamentos alinhados com sucesso.")
 
     def _zoom_from_combo(self, _e=None):
         txt = self.zoom_var.get().replace("%", "").strip()
@@ -3610,6 +3874,7 @@ DOMÍNIOS
         arq = tk.Menu(mb, tearoff=0)
         arq.add_command(label="Novo projeto", accelerator="Ctrl+N", command=self.new_project)
         arq.add_command(label="Abrir…", accelerator="Ctrl+O", command=self.load_project)
+        arq.add_command(label="Importar modelo…", accelerator="Ctrl+I", command=self.open_import_dialog)
         ex = tk.Menu(arq, tearoff=0)
         ex.add_command(label="Empresa (Navathe cap. 3)", command=self.load_navathe_example)
         ex.add_command(label="EER (especialização, categoria, domínio)", command=self.load_eer_example)
@@ -3670,6 +3935,7 @@ DOMÍNIOS
         ins.add_command(label="Relacionamento", accelerator="Ctrl+L", command=self.toggle_link)
         ins.add_command(label="Relacionamento identificador", command=lambda: self.toggle_link(identifying=True))
         ins.add_command(label="Relacionamento n-ário", command=self.toggle_nary)
+        ins.add_command(label="Arco de exclusividade (Barker XOR)…", command=self.open_arc_dialog)
         ins.add_separator()
         ins.add_command(label="Especialização", command=lambda: self.new_specialization("specialization"))
         ins.add_command(label="Generalização", command=lambda: self.new_specialization("generalization"))
@@ -3678,6 +3944,14 @@ DOMÍNIOS
         ins.add_command(label="Atributo na seleção", command=self.add_attribute_to_selected)
         ins.add_command(label="Domínios…", command=self.open_domains)
         mb.add_cascade(label="Inserir", menu=ins)
+
+        dia = tk.Menu(mb, tearoff=0)
+        dia.add_command(label="Alinhar horizontalmente (mesmo nível Y)", accelerator="Ctrl+H", command=self.align_rel_horizontal)
+        dia.add_command(label="Alinhar verticalmente (mesma coluna X)", accelerator="Ctrl+Shift+H", command=self.align_rel_vertical)
+        dia.add_command(label="Auto-alinhar relacionamento selecionado", command=self.auto_align_selected_rel)
+        dia.add_separator()
+        dia.add_command(label="Auto-alinhar todos os relacionamentos", command=self.auto_align_all_relationships)
+        mb.add_cascade(label="Diagramação", menu=dia)
 
         db = tk.Menu(mb, tearoff=0)
         db.add_command(label="Validar modelo", accelerator="F5", command=self.validate_model)

@@ -467,8 +467,47 @@ class Specialization:
                               description=d.get("description", ""), id=d.get("id"))
 
 
+class RelationshipArc:
+    """Arco de Relacionamento (Relationship Arc / Exclusive Arc) — Notação de Barker & Oracle Designer.
+
+    No Oracle Designer / Notação de Barker, um arco agrupa dois ou mais relacionamentos pertencentes
+    à mesma entidade (âncora).
+    Indica exclusividade mútua (XOR): uma ocorrência da entidade só pode participar de no máximo
+    um (se opcional) ou exatamente um (se obrigatório/mandatory) dos relacionamentos do arco.
+    """
+
+    def __init__(self, entity_id, rel_ids=None, name="", mandatory=True, description="", id=None):
+        self.id = id or new_id("arc")
+        self.entity_id = entity_id
+        self.rel_ids = list(rel_ids or [])
+        self.name = name or ""
+        self.mandatory = bool(mandatory)
+        self.description = description or ""
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "entity_id": self.entity_id,
+            "rel_ids": list(self.rel_ids),
+            "name": self.name,
+            "mandatory": self.mandatory,
+            "description": self.description,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return RelationshipArc(
+            entity_id=d.get("entity_id"),
+            rel_ids=d.get("rel_ids", []),
+            name=d.get("name", ""),
+            mandatory=d.get("mandatory", True),
+            description=d.get("description", ""),
+            id=d.get("id"),
+        )
+
+
 class Project:
-    """Gerencia entidades, relacionamentos, especializações e domínios do modelo ER."""
+    """Gerencia entidades, relacionamentos, especializações, arcos e domínios do modelo ER."""
 
     NOTATIONS = ("chen", "barker")
 
@@ -477,6 +516,7 @@ class Project:
         self.rels = []
         self.specs = []
         self.domains = []
+        self.arcs = []
         self.notation = notation if notation in self.NOTATIONS else "chen"
         # "ratio" -> 1 / N / M ; "minmax" -> (min,max) derivado da participação
         self.card_style = "ratio"
@@ -493,8 +533,23 @@ class Project:
     def find_domain(self, did):
         return next((d for d in self.domains if d.id == did), None)
 
+    def find_arc(self, aid):
+        return next((a for a in self.arcs if a.id == aid), None)
+
     def add_entity(self, entity):
         self.entities.append(entity)
+
+    def add_arc(self, arc):
+        self.arcs.append(arc)
+
+    def remove_arc(self, aid):
+        self.arcs = [a for a in self.arcs if a.id != aid]
+
+    def arcs_of_entity(self, eid):
+        return [a for a in self.arcs if a.entity_id == eid]
+
+    def arcs_of_rel(self, rid):
+        return [a for a in self.arcs if rid in a.rel_ids]
 
     def remove_entity(self, eid):
         self.entities = [e for e in self.entities if e.id != eid]
@@ -505,9 +560,18 @@ class Project:
             s.parent_ids = [i for i in s.parent_ids if i != eid]
             s.child_ids = [i for i in s.child_ids if i != eid]
         self.specs = [s for s in self.specs if s.parent_ids and s.child_ids]
+        self.arcs = [a for a in self.arcs if a.entity_id != eid]
+        # remove relacionamentos deletados dos arcos restantes
+        valid_rel_ids = {r.id for r in self.rels}
+        for a in self.arcs:
+            a.rel_ids = [rid for rid in a.rel_ids if rid in valid_rel_ids]
+        self.arcs = [a for a in self.arcs if len(a.rel_ids) >= 2]
 
     def remove_rel(self, rid):
         self.rels = [r for r in self.rels if r.id != rid]
+        for a in self.arcs:
+            a.rel_ids = [r_id for r_id in a.rel_ids if r_id != rid]
+        self.arcs = [a for a in self.arcs if len(a.rel_ids) >= 2]
 
     def remove_spec(self, sid):
         self.specs = [s for s in self.specs if s.id != sid]
@@ -545,6 +609,7 @@ class Project:
             "entities": [e.to_dict() for e in self.entities],
             "rels": [r.to_dict() for r in self.rels],
             "specs": [s.to_dict() for s in self.specs],
+            "arcs": [a.to_dict() for a in self.arcs],
         }
 
     @staticmethod
@@ -558,6 +623,7 @@ class Project:
         p.entities = [Entity.from_dict(e) for e in d.get("entities", [])]
         p.rels = [Relationship.from_dict(r) for r in d.get("rels", [])]
         p.specs = [Specialization.from_dict(s) for s in d.get("specs", [])]
+        p.arcs = [RelationshipArc.from_dict(a) for a in d.get("arcs", [])]
         return p
 
     def save(self, path):

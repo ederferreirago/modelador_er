@@ -112,6 +112,24 @@ def validate_project(project):
         if not any(a.domain_id == d.id for a in project.iter_attributes()):
             add(INFO, f"Domínio '{d.name}' não é usado por nenhum atributo.")
 
+    for arc in getattr(project, "arcs", []):
+        ent = project.find_entity(arc.entity_id)
+        arc_lbl = f"Arco '{arc.name}'" if arc.name else "Arco de exclusividade"
+        if not ent:
+            add(ERROR, f"{arc_lbl} aponta para entidade inexistente.")
+            continue
+        if len(arc.rel_ids) < 2:
+            add(ERROR, f"{arc_lbl} na entidade '{ent.name}' deve ter pelo menos 2 relacionamentos.")
+        for rid in arc.rel_ids:
+            rel = project.find_rel(rid)
+            if not rel:
+                add(ERROR, f"{arc_lbl} em '{ent.name}' referencia relacionamento inexistente.")
+            elif ent.id not in (rel.entity1_id, rel.entity2_id):
+                add(ERROR, f"{arc_lbl} em '{ent.name}': relacionamento '{rel.name}' não envolve a entidade.")
+            elif rel.is_nary or (rel.card1.upper() in ("M", "N") and rel.card2.upper() in ("M", "N")):
+                add(WARN, f"{arc_lbl} em '{ent.name}': relacionamento '{rel.name}' é M:N ou N-ário "
+                          f"(arcos no Oracle Designer requerem chave estrangeira direta).")
+
     order = {ERROR: 0, WARN: 1, INFO: 2}
     issues.sort(key=lambda x: order[x[0]])
     return issues

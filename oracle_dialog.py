@@ -212,8 +212,10 @@ class OracleDialog(tk.Toplevel):
             row=4, column=1, sticky="w", padx=8)
         bar = ttk.Frame(box)
         bar.grid(row=5, column=1, sticky="w", padx=8, pady=(8, 0))
+        self.btn_test = ttk.Button(bar, text="⚡ Testar Conexão", command=self.test_connection)
+        self.btn_test.pack(side="left")
         self.btn_connect = ttk.Button(bar, text="🔌 Conectar", command=self.connect)
-        self.btn_connect.pack(side="left")
+        self.btn_connect.pack(side="left", padx=6)
         ttk.Button(bar, text="💾 Salvar perfil (sem senha)", command=self.save_profile).pack(side="left", padx=6)
 
         dest = ttk.LabelFrame(f, text="O que criar e onde", padding=10)
@@ -241,7 +243,7 @@ class OracleDialog(tk.Toplevel):
         self._toggle_mkschema()
         ttk.Label(f, text="Nada é apagado nem sobrescrito: tabelas que já existem são apenas comparadas.",
                   foreground="#73809B").pack(anchor="w", pady=(4, 0))
-        self.action_buttons.append(self.btn_connect)
+        self.action_buttons.extend([self.btn_test, self.btn_connect])
 
     def _toggle_mkschema(self):
         st = "normal" if self.mkschema_var.get() else "disabled"
@@ -251,6 +253,46 @@ class OracleDialog(tk.Toplevel):
     def save_profile(self):
         O.save_profile(self._cfg())
         self.status.config(text=f"Perfil salvo em {O.profile_path()} (sem a senha)")
+
+    def test_connection(self):
+        cfg, pwd = self._cfg(), self.pwd_var.get()
+        if not cfg.user or not cfg.dsn:
+            messagebox.showwarning("Oracle", "Informe usuário e DSN para testar a conexão.", parent=self)
+            return
+
+        def work():
+            c = O.connect(cfg, pwd)
+            try:
+                info = O.session_info(c)
+                banner = ""
+                cur = c.cursor()
+                try:
+                    cur.execute("SELECT banner FROM v$version WHERE ROWNUM = 1")
+                    row = cur.fetchone()
+                    if row:
+                        banner = str(row[0])
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                return info, banner
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+        def done(res):
+            info, banner = res
+            cont = f" (Container: {info.get('container')})" if info.get("container") else ""
+            msg = f"Conexão com o Oracle testada com SUCESSO!\n\n• Usuário: {info.get('user', cfg.user)}\n• Servidor: {banner or 'Oracle Database'}{cont}\n• DSN: {cfg.dsn}"
+            messagebox.showinfo("Oracle - Teste de Conexão", msg, parent=self)
+            self.status.config(text="Teste de conexão bem-sucedido.")
+
+        self._bg(work, done, "Testando conexão com o Oracle…")
 
     def connect(self):
         cfg, pwd = self._cfg(), self.pwd_var.get()
@@ -313,6 +355,14 @@ class OracleDialog(tk.Toplevel):
                                       height=18, anchors={"rows": "e"})
         box.pack(fill="both", expand=True, pady=(4, 0))
         self.ex_tree.bind("<<TreeviewSelect>>", self._ex_select)
+
+        act_bar = ttk.Frame(left)
+        act_bar.pack(fill="x", pady=(6, 0))
+        self.btn_import_concept = ttk.Button(act_bar, text="📥 Importar para Modelo", command=self.ex_import_conceptual)
+        self.btn_import_concept.pack(side="left", fill="x", expand=True)
+        self.btn_export_dict = ttk.Button(act_bar, text="📊 Exportar CSV", command=self.ex_export_dictionary)
+        self.btn_export_dict.pack(side="left", padx=(4, 0))
+        self.action_buttons.extend([self.btn_import_concept, self.btn_export_dict])
 
         self.ex_head = ttk.Label(right, text="Selecione uma tabela à esquerda.", font=("Segoe UI", 10, "bold"),
                                  wraplength=760, justify="left")
@@ -484,6 +534,98 @@ class OracleDialog(tk.Toplevel):
                 tree.insert("", "end", values=["" if v is None else str(v)[:200] for v in row])
             self.status.config(text=f"{len(rows)} linhas de {owner}.{table} (limite {n}).")
         self._bg(lambda: O.sample_rows(conn, owner, table, n), done, "Lendo amostra…")
+
+    def ex_import_conceptual(self):
+        if not self._need_conn():
+            return
+        owner = self.ex_schema.get()
+        if not owner:
+            messagebox.showinfo("Oracle", "Selecione um schema primeiro.", parent=self)
+            return
+        sel = self.ex_tree.selection()
+        if not sel:
+            if not self.ex_tables:
+                messagebox.showinfo("Importar", f"Nenhuma tabela encontrada no schema {owner}.", parent=self)
+                return
+            if not messagebox.askyesno("Importar Tabelas",
+                                       f"Nenhuma tabela específica foi selecionada.\n\n"
+                                       f"Deseja importar todas as {len(self.ex_tables)} tabelas do schema '{owner}' "
+                                       f"para o modelo conceitual?", parent=self):
+                return
+            table_names = [t["name"] for t in self.ex_tables]
+        else:
+            table_names = list(sel)
+
+        import model_importer
+
+        def work():
+            return model_importer.import_from_oracle_tables(self.sess, owner, table_names)
+
+        def done(new_project):
+            self.app.project = new_project
+            self.app.history.reset()
+            self.app._rebuild_sidebar()
+            self.app.render()
+            msg = (f"Modelo conceitual importado com sucesso a partir do Oracle!\n\n"
+                   f"• {len(new_project.entities)} Entidades\n"
+                   f"• {len(new_project.rels)} Relacionamentos\n\n"
+                   f"O diagrama foi gerado com layout automático no editor principal.")
+            messagebox.showinfo("Importar Modelo Conceitual", msg, parent=self)
+            self.status.config(text=f"Modelo conceitual importado ({len(new_project.entities)} entidades).")
+            self.destroy()
+
+        self._bg(work, done, f"Importando {len(table_names)} tabelas de {owner} para o modelo conceitual…")
+
+    def ex_export_dictionary(self):
+        if not self._need_conn():
+            return
+        if not self.ex_tables:
+            messagebox.showinfo("Exportar", "Nenhuma tabela carregada para exportar.", parent=self)
+            return
+        import csv
+        from tkinter import filedialog
+        owner = self.ex_schema.get() or "ORACLE"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Exportar Dicionário de Dados",
+            defaultextension=".csv",
+            initialfile=f"dicionario_{owner.lower()}.csv",
+            filetypes=[("CSV (Separado por ponto e vírgula)", "*.csv"), ("Todos os arquivos", "*.*")]
+        )
+        if not path:
+            return
+
+        def work():
+            rows = [["SCHEMA", "TABELA", "COLUNA", "TIPO", "NULO", "PK", "FK", "COMENTARIO_COLUNA", "COMENTARIO_TABELA"]]
+            conn, views = self.sess.conn, self.sess.views
+            meta = O.read_table_metadata(conn, owner, [t["name"] for t in self.ex_tables], views)
+            for t in self.ex_tables:
+                tname = t["name"]
+                tmeta = meta.get(tname, {})
+                pk_set = set(tmeta.get("pk", []))
+                for c in tmeta.get("columns", []):
+                    cname = c.get("name", "")
+                    rows.append([
+                        owner,
+                        tname,
+                        cname,
+                        c.get("type", ""),
+                        "SIM" if c.get("nullable") else "NÃO",
+                        "SIM" if cname in pk_set else "NÃO",
+                        "",
+                        c.get("comment", ""),
+                        t.get("comment", ""),
+                    ])
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerows(rows)
+            return len(rows) - 1
+
+        def done(count):
+            messagebox.showinfo("Exportar Dicionário", f"Dicionário exportado com sucesso!\n\n{count} colunas salvas em:\n{path}", parent=self)
+            self.status.config(text=f"Dicionário exportado para {path}")
+
+        self._bg(work, done, "Exportando dicionário de dados…")
 
     # ------------------------------------------------------------ aba 3: verificação
     def _build_verify_tab(self):

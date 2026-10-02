@@ -80,19 +80,33 @@ def bends(pts):
 
 
 def elbow_route(pa, na, pb, nb):
-    """Roteamento rápido (ignora obstáculos): L ou Z entre duas portas."""
-    sa = (pa[0] + na[0] * STUB, pa[1] + na[1] * STUB)
-    sb = (pb[0] + nb[0] * STUB, pb[1] + nb[1] * STUB)
+    """Roteamento rápido (ignora obstáculos): linha reta direta quando alinhado, ou L/Z entre duas portas."""
     horiz_a, horiz_b = na[1] == 0, nb[1] == 0
     if horiz_a and horiz_b:
+        # Portas opostas no mesmo eixo Y apontando uma para a outra: linha reta horizontal pura
+        if na[0] * nb[0] == -1 and abs(pa[1] - pb[1]) < 0.5:
+            if (na[0] > 0 and pa[0] <= pb[0]) or (na[0] < 0 and pa[0] >= pb[0]):
+                return [pa, (pb[0], pa[1])]
+        sa = (pa[0] + na[0] * STUB, pa[1] + na[1] * STUB)
+        sb = (pb[0] + nb[0] * STUB, pb[1] + nb[1] * STUB)
         mx = (sa[0] + sb[0]) / 2.0
         mid = [(mx, sa[1]), (mx, sb[1])]
     elif not horiz_a and not horiz_b:
+        # Portas opostas no mesmo eixo X apontando uma para a outra: linha reta vertical pura
+        if na[1] * nb[1] == -1 and abs(pa[0] - pb[0]) < 0.5:
+            if (na[1] > 0 and pa[1] <= pb[1]) or (na[1] < 0 and pa[1] >= pb[1]):
+                return [pa, (pa[0], pb[1])]
+        sa = (pa[0] + na[0] * STUB, pa[1] + na[1] * STUB)
+        sb = (pb[0] + nb[0] * STUB, pb[1] + nb[1] * STUB)
         my = (sa[1] + sb[1]) / 2.0
         mid = [(sa[0], my), (sb[0], my)]
     elif horiz_a:
+        sa = (pa[0] + na[0] * STUB, pa[1] + na[1] * STUB)
+        sb = (pb[0] + nb[0] * STUB, pb[1] + nb[1] * STUB)
         mid = [(sb[0], sa[1])]
     else:
+        sa = (pa[0] + na[0] * STUB, pa[1] + na[1] * STUB)
+        sb = (pb[0] + nb[0] * STUB, pb[1] + nb[1] * STUB)
         mid = [(sa[0], sb[1])]
     return _simplify([pa, sa] + mid + [sb, pb])
 
@@ -324,10 +338,31 @@ def route_edges(rects, edges, fast=False):
         pa = port_at(ra, sa, frac[(e["key"], "a")])
         pb = port_at(rb, sb, frac[(e["key"], "b")])
         na, nb = NORMALS[sa], NORMALS[sb]
+        obstacles = [r for k, r in rects.items() if k not in (e["a"], e["b"]) and k not in e.get("ignore", ())]
+
+        # Alinhamento fino para linha reta direta quando caixas estão alinhadas ou quase alinhadas
+        if sa in ("left", "right") and sb in ("left", "right") and na[0] * nb[0] == -1:
+            if abs(pa[1] - pb[1]) < 18.0:
+                y_align = (pa[1] + pb[1]) / 2.0
+                (ax1, ay1), (ax2, ay2) = side_points(ra, sa)
+                (bx1, by1), (bx2, by2) = side_points(rb, sb)
+                if min(ay1, ay2) <= y_align <= max(ay1, ay2) and min(by1, by2) <= y_align <= max(by1, by2):
+                    t_pa, t_pb = (pa[0], y_align), (pb[0], y_align)
+                    if not any(segment_hits_rect(t_pa, t_pb, obs) for obs in obstacles):
+                        pa, pb = t_pa, t_pb
+        elif sa in ("top", "bottom") and sb in ("top", "bottom") and na[1] * nb[1] == -1:
+            if abs(pa[0] - pb[0]) < 18.0:
+                x_align = (pa[0] + pb[0]) / 2.0
+                (ax1, ay1), (ax2, ay2) = side_points(ra, sa)
+                (bx1, by1), (bx2, by2) = side_points(rb, sb)
+                if min(ax1, ax2) <= x_align <= max(ax1, ax2) and min(bx1, bx2) <= x_align <= max(bx1, bx2):
+                    t_pa, t_pb = (x_align, pa[1]), (x_align, pb[1])
+                    if not any(segment_hits_rect(t_pa, t_pb, obs) for obs in obstacles):
+                        pa, pb = t_pa, t_pb
+
         if fast:
             pts = elbow_route(pa, na, pb, nb)
         else:
-            obstacles = [r for k, r in rects.items() if k not in (e["a"], e["b"]) and k not in e.get("ignore", ())]
             res = _route_between(pa, na, pb, nb, obstacles, used)
             pts = res[0] if res else elbow_route(pa, na, pb, nb)
         used.add_path(pts)

@@ -4,7 +4,7 @@ import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from models import Attribute, Domain, Specialization
+from models import Attribute, Domain, Specialization, RelationshipArc
 
 TYPES = ["STRING", "INTEGER", "DECIMAL", "DATE", "BOOLEAN", "TEXT"]
 
@@ -1130,3 +1130,335 @@ class DDLWindow(tk.Toplevel):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self.ddl_text)
             self.info.config(text=f"Salvo: {path}")
+
+
+class ArcDialog(tk.Toplevel):
+    """Diálogo para criação e edição de Arcos de Relacionamento (Barker / Oracle Designer).
+
+    Permite agrupar relacionamentos mutuamente exclusivos em torno de uma entidade âncora.
+    """
+
+    def __init__(self, parent, project, arc=None):
+        super().__init__(parent)
+        self.project = project
+        self.arc = arc
+        self.result = None
+        self.title("Arco de Exclusividade (Barker / Oracle Designer)" if not arc else f"Editar Arco: {arc.name}")
+        self.geometry("560x520")
+        self.transient(parent)
+        self.grab_set()
+
+        # Entidades disponíveis com pelo menos 2 relacionamentos
+        self.entities = project.entities
+        if not self.entities:
+            messagebox.showwarning("Arco", "O modelo não possui entidades.", parent=self)
+            self.destroy()
+            return
+
+        ent_initial = arc.entity_id if arc else self.entities[0].id
+        self.ent_var = tk.StringVar(value=ent_initial)
+        self.name_var = tk.StringVar(value=arc.name if arc else "")
+        self.mandatory_var = tk.BooleanVar(value=arc.mandatory if arc else True)
+        self.desc_var = tk.StringVar(value=arc.description if arc else "")
+        self.rel_checks = {}  # rel_id -> BooleanVar
+
+        self._build_ui()
+        self._refresh_rels()
+
+    def _build_ui(self):
+        pad = 12
+        frame = ttk.Frame(self, padding=pad)
+        frame.pack(fill="both", expand=True)
+
+        # Cabeçalho explicativo
+        hdr = ttk.Label(
+            frame,
+            text="Na notação de Barker (Oracle Designer), um Arco conecta dois ou mais relacionamentos\n"
+                 "de uma entidade para indicar exclusividade mútua (XOR).",
+            foreground="#55627D",
+            font=("Segoe UI", 9, "italic")
+        )
+        hdr.pack(anchor="w", pady=(0, 10))
+
+        # Entidade Âncora
+        frow = ttk.Frame(frame)
+        frow.pack(fill="x", pady=4)
+        ttk.Label(frow, text="Entidade Âncora:", width=16).pack(side="left")
+        self.ent_combo = ttk.Combobox(
+            frow,
+            values=[f"{e.name} ({e.id})" for e in self.entities],
+            state="readonly",
+            width=36
+        )
+        curr_e = self.project.find_entity(self.ent_var.get())
+        if curr_e:
+            self.ent_combo.set(f"{curr_e.name} ({curr_e.id})")
+        self.ent_combo.bind("<<ComboboxSelected>>", self._on_ent_changed)
+        self.ent_combo.pack(side="left", padx=6)
+
+        # Nome do Arco
+        nrow = ttk.Frame(frame)
+        nrow.pack(fill="x", pady=4)
+        ttk.Label(nrow, text="Nome do Arco:", width=16).pack(side="left")
+        ttk.Entry(nrow, textvariable=self.name_var, width=38).pack(side="left", padx=6)
+
+        # Mandatoriedade
+        mrow = ttk.Frame(frame)
+        mrow.pack(fill="x", pady=4)
+        ttk.Label(mrow, text="Tipo de Arco:", width=16).pack(side="left")
+        ttk.Radiobutton(mrow, text="Obrigatório (Exatamente um — linha contínua)",
+                        variable=self.mandatory_var, value=True).pack(anchor="w")
+        ttk.Radiobutton(mrow, text="Opcional (No máximo um — linha tracejada)",
+                        variable=self.mandatory_var, value=False).pack(anchor="w", padx=(120, 0))
+
+        # Lista de Relacionamentos com Checkboxes
+        lframe = ttk.LabelFrame(frame, text="Relacionamentos Participantes (selecione pelo menos 2)", padding=8)
+        lframe.pack(fill="both", expand=True, pady=10)
+
+        self.canvas = tk.Canvas(lframe, borderwidth=0, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(lframe, orient="vertical", command=self.canvas.yview)
+        self.scroll_frame = ttk.Frame(self.canvas)
+        self.scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        bind_mousewheel(self.scroll_frame, self.canvas)
+
+        # Descrição
+        drow = ttk.Frame(frame)
+        drow.pack(fill="x", pady=4)
+        ttk.Label(drow, text="Descrição / Regra:", width=16).pack(side="left")
+        ttk.Entry(drow, textvariable=self.desc_var, width=44).pack(side="left", padx=6)
+
+        # Botões Salvar / Cancelar
+        btn_box = ttk.Frame(frame)
+        btn_box.pack(fill="x", pady=(10, 0))
+        ttk.Button(btn_box, text="Cancelar", command=self.destroy).pack(side="right", padx=4)
+        ttk.Button(btn_box, text="Salvar Arco", command=self._save).pack(side="right", padx=4)
+
+    def _on_ent_changed(self, _event=None):
+        sel = self.ent_combo.get()
+        if "(" in sel and sel.endswith(")"):
+            eid = sel.split("(")[-1].rstrip(")")
+            self.ent_var.set(eid)
+            self._refresh_rels()
+
+    def _refresh_rels(self):
+        for w in self.scroll_frame.winfo_children():
+            w.destroy()
+        self.rel_checks.clear()
+
+        eid = self.ent_var.get()
+        ent = self.project.find_entity(eid)
+        if not ent:
+            return
+
+        # Busca todos os relacionamentos onde essa entidade participa
+        connected_rels = [
+            r for r in self.project.rels
+            if eid in (r.entity1_id, r.entity2_id) or any(p.get("entity_id") == eid for p in r.extra_parts)
+        ]
+
+        if not connected_rels:
+            ttk.Label(self.scroll_frame, text=f"A entidade '{ent.name}' não possui relacionamentos conectados.",
+                      foreground="#9CA3AF").pack(anchor="w", pady=4)
+            return
+
+        active_rids = set(self.arc.rel_ids) if self.arc else set()
+        for r in connected_rels:
+            other_ids = [p[0] for p in r.participants() if p[0] != eid]
+            other_names = [self.project.find_entity(oid).name for oid in other_ids if self.project.find_entity(oid)]
+            other_txt = f" ➔ {', '.join(other_names)}" if other_names else ""
+            var = tk.BooleanVar(value=r.id in active_rids)
+            self.rel_checks[r.id] = var
+            cb = ttk.Checkbutton(
+                self.scroll_frame,
+                text=f"{r.name}{other_txt} ({r.card1}:{r.card2})",
+                variable=var
+            )
+            cb.pack(anchor="w", pady=2)
+
+    def _save(self):
+        eid = self.ent_var.get()
+        selected_rids = [rid for rid, var in self.rel_checks.items() if var.get()]
+
+        if len(selected_rids) < 2:
+            messagebox.showwarning(
+                "Arco de Exclusividade",
+                "Um arco deve conter pelo menos 2 relacionamentos mutuamente exclusivos.",
+                parent=self
+            )
+            return
+
+        ent = self.project.find_entity(eid)
+        name = self.name_var.get().strip() or f"arc_{ent.name.lower()}"
+
+        if self.arc:
+            self.arc.entity_id = eid
+            self.arc.rel_ids = selected_rids
+            self.arc.name = name
+            self.arc.mandatory = self.mandatory_var.get()
+            self.arc.description = self.desc_var.get().strip()
+            self.result = self.arc
+        else:
+            self.result = RelationshipArc(
+                entity_id=eid,
+                rel_ids=selected_rids,
+                name=name,
+                mandatory=self.mandatory_var.get(),
+                description=self.desc_var.get().strip(),
+            )
+            self.project.add_arc(self.result)
+
+        self.destroy()
+
+
+class ImportModelDialog(tk.Toplevel):
+    """Diálogo para importação de Modelos Conceituais e Dimensionais a partir de múltiplos formatos."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("Importar Modelo Conceitual / Dimensional")
+        self.geometry("580x440")
+        self.transient(parent)
+        self.grab_set()
+
+        self._build_ui()
+
+    def _build_ui(self):
+        f = ttk.Frame(self, padding=16)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(
+            f,
+            text="Selecione a fonte de dados para importar o modelo:",
+            font=("Segoe UI", 11, "bold")
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Label(
+            f,
+            text="O Modelador ER irá analisar as tabelas, atributos, chaves primárias, estrangeiras e domínios,\n"
+                 "gerando o diagrama conceitual com posicionamento visual automático.",
+            foreground="#55627D"
+        ).pack(anchor="w", pady=(0, 14))
+
+        options = [
+            ("📊 Matriz DE-PARA em Excel (.xlsx)",
+             "Importa tabelas fato, dimensões (SCD1/SCD2), campos e domínios de matrizes de rastreabilidade DW/BI.",
+             self._import_excel),
+            ("📁 Arquivo de Modelo ER em JSON (.json)",
+             "Importa especificações de modelos conceituais completos (com ou sem diagrama prévio).",
+             self._import_json),
+            ("⚙ Script SQL DDL (.sql)",
+             "Lê instruções CREATE TABLE, PRIMARY KEY e FOREIGN KEY de scripts SQL para gerar o modelo conceitual.",
+             self._import_sql),
+            ("🏛 Exemplo Dimensional Estrela (SEFAZ / Correios DTE)",
+             "Carrega o modelo dimensional completo de Mensagens em Lote / DTE pronto para estudo e documentação.",
+             self._load_sample_star),
+        ]
+
+        for title, desc, cmd in options:
+            box = ttk.Frame(f, padding=8, relief="groove")
+            box.pack(fill="x", pady=5)
+            row = ttk.Frame(box)
+            row.pack(fill="x")
+            ttk.Label(row, text=title, font=("Segoe UI", 10, "bold")).pack(side="left")
+            ttk.Button(row, text="Importar...", command=cmd).pack(side="right")
+            ttk.Label(box, text=desc, foreground="#64748B", wraplength=520, justify="left").pack(anchor="w", pady=(3, 0))
+
+        btn_box = ttk.Frame(f)
+        btn_box.pack(fill="x", pady=(14, 0))
+        ttk.Button(btn_box, text="Fechar", command=self.destroy).pack(side="right")
+
+    def _apply_project(self, new_project, source_name):
+        doc_name = f"Importado ({source_name})"
+        document = self.app._add_document(new_project, doc_name)
+        self.app._activate_document(document)
+        self.app.zoom_fit()
+        self.app.render()
+        if hasattr(self.app, "status_msg"):
+            self.app.status_msg.config(
+                text=f"Modelo importado com sucesso: {len(new_project.entities)} entidades, "
+                     f"{len(new_project.rels)} relacionamentos."
+            )
+        messagebox.showinfo(
+            "Importação Concluída",
+            f"Modelo importado com sucesso a partir de:\n{source_name}\n\n"
+            f"• {len(new_project.entities)} Entidades / Tabelas\n"
+            f"• {len(new_project.rels)} Relacionamentos\n"
+            f"• {len(new_project.domains)} Domínios de Valores\n\n"
+            f"O diagrama foi gerado com layout limpo no editor.",
+            parent=self
+        )
+        self.destroy()
+
+    def _import_excel(self):
+        import model_importer
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Selecionar Planilha Excel DE-PARA",
+            filetypes=[("Planilhas Excel", "*.xlsx;*.xlsm"), ("Todos os arquivos", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            proj = model_importer.import_from_dexpara_excel(path)
+            self._apply_project(proj, os.path.basename(path))
+        except Exception as ex:
+            messagebox.showerror("Erro na Importação", f"Falha ao ler a planilha Excel:\n{ex}", parent=self)
+
+    def _import_json(self):
+        import model_importer
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Selecionar Arquivo JSON",
+            filetypes=[("Arquivos JSON", "*.json"), ("Todos os arquivos", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            proj = model_importer.import_from_json(path)
+            self._apply_project(proj, os.path.basename(path))
+        except Exception as ex:
+            messagebox.showerror("Erro na Importação", f"Falha ao ler arquivo JSON:\n{ex}", parent=self)
+
+    def _import_sql(self):
+        import model_importer
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Selecionar Script SQL DDL",
+            filetypes=[("Scripts SQL", "*.sql"), ("Todos os arquivos", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            proj = model_importer.import_from_sql_ddl(content)
+            self._apply_project(proj, os.path.basename(path))
+        except Exception as ex:
+            messagebox.showerror("Erro na Importação", f"Falha ao processar script SQL:\n{ex}", parent=self)
+
+    def _load_sample_star(self):
+        import model_importer
+        sample_path = r"C:\Users\eder.souza\Downloads\DEXPARA_Transacional_DW.xlsx"
+        if os.path.exists(sample_path):
+            try:
+                proj = model_importer.import_from_dexpara_excel(sample_path)
+                self._apply_project(proj, "Exemplo Estrela SEFAZ DTE / Correios (DEXPARA_Transacional_DW.xlsx)")
+                return
+            except Exception:
+                pass
+        # Fallback para JSON navathe
+        json_path = r"C:\Users\eder.souza\Downloads\03-diagrama-estrela-navathe.json"
+        if os.path.exists(json_path):
+            proj = model_importer.import_from_json(json_path)
+            self._apply_project(proj, "Exemplo Estrela Navathe (03-diagrama-estrela-navathe.json)")
+        else:
+            messagebox.showinfo("Exemplo", "Arquivo de exemplo não encontrado nos Downloads.", parent=self)
+
