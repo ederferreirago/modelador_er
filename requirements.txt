@@ -3,3 +3,4 @@
 reportlab>=4.0
 # oracledb: necessário apenas para conectar no Oracle (modo thin: dispensa o Oracle Client).
 oracledb>=2.0
+openpyxl>=0
