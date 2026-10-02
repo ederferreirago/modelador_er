@@ -162,6 +162,11 @@ O aplicativo inclui o esquema clássico completo da **Figura 3.2** do livro de N
 - Opcional: `reportlab` para exportação em PDF (`pip install reportlab`)
 
 ```bash
+
+# Criar Variável
+python -m venv .venv
+
+
 # Ativar o ambiente virtual
 .venv/Scripts/activate
 
